@@ -131,7 +131,14 @@ fn update_when_up_to_date_changes_nothing() {
         assert!(output.status.success(), "{output:?}");
         assert!(stdout(&output).contains(&format!("Up to date: {BUILT}")), "{output:?}");
     }
-    assert_eq!(snapshot(&home.0), before);
+    let mut after = snapshot(&home.0);
+    let recorded = [
+        ".purrdr/host-service/update.json",
+        ".purrdr/host-service/logs/",
+        ".purrdr/host-service/logs/update.log",
+    ];
+    after.retain(|path, _| !recorded.contains(&path.as_str()));
+    assert_eq!(after, before, "只多了更新結果的紀錄");
 }
 
 #[test]
@@ -167,5 +174,49 @@ fn update_errors_end_with_next_step() {
     }
     assert!(stderr(&not_installed).contains("not installed"), "{not_installed:?}");
     assert!(stderr(&offline).contains("update --check"), "重跑指令要帶原本的選項：{offline:?}");
+    assert_eq!(std::fs::read_dir(&empty.0).unwrap().count(), 0);
+}
+
+#[test]
+fn version_shows_auto_update_and_the_last_check() {
+    let home = installed_home();
+    let server = release(BUILT);
+
+    let before_any_check = stdout(&run(&home, &server.url(), &["version"]));
+    run(&home, &server.url(), &["update", "--yes"]);
+    let after_update_command = stdout(&run(&home, &server.url(), &["version"]));
+
+    assert!(before_any_check.contains("auto update: on\n"), "{before_any_check}");
+    assert!(before_any_check.contains("last check: never\n"), "{before_any_check}");
+    assert!(after_update_command.contains(&format!(", up to date ({BUILT})\n")), "{after_update_command}");
+    assert!(after_update_command.contains("last check: 20"), "時間是 RFC 3339:{after_update_command}");
+}
+
+#[test]
+fn auto_update_off_and_on_change_the_setting() {
+    let home = installed_home();
+    let server = release(BUILT);
+
+    let off = run(&home, &server.url(), &["auto-update", "off"]);
+    let version_when_off = stdout(&run(&home, &server.url(), &["version"]));
+    let on = run(&home, &server.url(), &["auto-update", "on"]);
+
+    assert!(off.status.success(), "{off:?}");
+    assert!(stdout(&off).contains("Auto update is off."), "{off:?}");
+    assert!(version_when_off.contains("auto update: off\n"), "{version_when_off}");
+    assert!(stdout(&on).contains("Auto update is on."), "{on:?}");
+    let record = std::fs::read_to_string(home.0.join(".purrdr/host-service/install.json")).unwrap();
+    assert!(record.contains("\"auto_update\": true"), "{record}");
+}
+
+#[test]
+fn auto_update_without_install_says_how_to_install() {
+    let empty = TempDirectory::new("update-cli-empty");
+
+    let output = run(&empty, &unreachable_url(), &["auto-update", "off"]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stderr(&output).contains("not installed"), "{output:?}");
+    assert!(stderr(&output).contains("\nNext: "), "{output:?}");
     assert_eq!(std::fs::read_dir(&empty.0).unwrap().count(), 0);
 }

@@ -4,9 +4,9 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::system::HostSystem;
+use super::system::{HostSystem, spawn_update_helper};
 use super::{HostEnvironment, InstallError, InstallPlatform, InstallRecord, ServiceLayout, autostart, read_install_record, service_arguments};
-use crate::update::{InstallLocation, UpdateError, Version};
+use crate::update::{InstallLocation, UpdateError, UpdateLauncher, UpdateRecord, Version};
 
 /// 替換時留下的舊執行檔副檔名。
 const PREVIOUS_SUFFIX: &str = ".previous";
@@ -37,6 +37,24 @@ impl<S: HostSystem> InstalledService<S> {
     /// 測試檢查假系統狀態。
     pub fn system(&self) -> &S {
         &self.system
+    }
+
+    /// 正在執行的是安裝好的那份(只有它做背景自動更新)。
+    pub fn runs_installed_copy(&self) -> bool {
+        let bin = self.layout().bin_directory();
+        let running_from = self.environment.current_executable.parent().and_then(|parent| parent.canonicalize().ok());
+        self.record().is_ok() && running_from.is_some() && running_from == bin.canonicalize().ok()
+    }
+
+    /// 執行安裝好的 `update --yes` 的啟動器。
+    pub fn update_launcher(&self) -> HelperLauncher {
+        HelperLauncher {
+            executable: self.layout().executable(),
+        }
+    }
+
+    fn update_status_file(&self) -> PathBuf {
+        self.layout().directory().join("update.json")
     }
 
     fn layout(&self) -> ServiceLayout {
@@ -156,6 +174,33 @@ impl<S: HostSystem> InstallLocation for InstalledService<S> {
         Ok(())
     }
 
+    fn auto_update(&mut self) -> Result<bool, UpdateError> {
+        Ok(self.record()?.auto_update)
+    }
+
+    /// `update.json` 只留最後一次，`logs/update.log` 逐行累積;寫不進去不影響更新。
+    fn record_result(&mut self, record: &UpdateRecord) {
+        let checked_at = humantime::format_rfc3339_seconds(record.checked_at).to_string();
+        let status = serde_json::json!({ "checked_at": checked_at, "result": record.result });
+        let _ = std::fs::write(self.update_status_file(), serde_json::to_string_pretty(&status).expect("可序列化"));
+        let log = self.layout().log_file().with_file_name("update.log");
+        if let Some(directory) = log.parent() {
+            let _ = std::fs::create_dir_all(directory);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+            use std::io::Write;
+            let _ = writeln!(file, "{checked_at} {}", record.result);
+        }
+    }
+
+    fn last_result(&mut self) -> Option<UpdateRecord> {
+        let status: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(self.update_status_file()).ok()?).ok()?;
+        Some(UpdateRecord {
+            checked_at: humantime::parse_rfc3339(status["checked_at"].as_str()?).ok()?,
+            result: status["result"].as_str()?.to_owned(),
+        })
+    }
+
     fn restart(&mut self, expected: &Version) -> Result<(), UpdateError> {
         let record = self.record()?;
         let address = SocketAddr::from(([127, 0, 0, 1], record.port));
@@ -175,6 +220,17 @@ impl<S: HostSystem> InstallLocation for InstalledService<S> {
             )));
         }
         Ok(())
+    }
+}
+
+/// 以獨立程序執行安裝好的 `update --yes`,服務重啟時不會跟著被結束。
+pub struct HelperLauncher {
+    executable: PathBuf,
+}
+
+impl UpdateLauncher for HelperLauncher {
+    fn launch(&mut self) -> Result<(), String> {
+        spawn_update_helper(&self.executable).map_err(|error| format!("{}: {error}", self.executable.display()))
     }
 }
 

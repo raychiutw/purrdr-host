@@ -4,6 +4,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 
@@ -14,6 +15,8 @@ const TAG_PREFIX: &str = "host-service-v";
 /// 正式的 Release 來源。
 pub const GITHUB_RELEASES: &str = "https://github.com/raychiutw/purrdr.host";
 const GITHUB_LATEST_RELEASE: &str = "https://api.github.com/repos/raychiutw/purrdr.host/releases/latest";
+/// 換成 `<base>/releases/latest` 格式來源的環境變數(測試與實機驗證用)。
+pub const RELEASE_URL_VARIABLE: &str = "PURRDR_HOST_SERVICE_RELEASE_URL";
 /// 壓縮檔大小上限(防止下載無止境)。
 const MAXIMUM_DOWNLOAD: u64 = 256 * 1024 * 1024;
 
@@ -164,6 +167,13 @@ fn io_error(error: impl std::fmt::Display) -> UpdateError {
     UpdateError::Io(error.to_string())
 }
 
+/// 上一次檢查或更新的時間與結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateRecord {
+    pub checked_at: SystemTime,
+    pub result: String,
+}
+
 /// 「檢查」的結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateCheck {
@@ -171,6 +181,9 @@ pub struct UpdateCheck {
     pub installed: Option<Version>,
     /// 取不到(例如沒有網路)時是錯誤。
     pub latest: Result<Version, UpdateError>,
+    /// 自動更新是否開啟;沒有安裝時 None。
+    pub auto_update: Option<bool>,
+    pub last_result: Option<UpdateRecord>,
 }
 
 impl UpdateCheck {
@@ -193,6 +206,25 @@ pub enum UpdateOutcome {
     UpToDate { installed: Version, latest: Version },
 }
 
+/// 背景自動檢查的結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomaticOutcome {
+    /// 自動更新關閉，沒有檢查。
+    Disabled,
+    UpToDate(Version),
+    /// 已啟動更新程序(由它套用並記錄結果)。
+    Started {
+        from: Version,
+        to: Version,
+    },
+    Failed(UpdateError),
+}
+
+/// 啟動獨立的更新程序(`update --yes`):服務重啟時它不會跟著被結束。
+pub trait UpdateLauncher {
+    fn launch(&mut self) -> Result<(), String>;
+}
+
 /// Release 來源：最新版本與該版本的檔案。
 pub trait ReleaseSource {
     fn latest_version(&mut self) -> Result<Version, UpdateError>;
@@ -213,6 +245,11 @@ pub trait InstallLocation {
     fn restore(&mut self) -> Result<(), UpdateError>;
     /// 重啟背景服務，限時內確認它在聽且回報 `expected`。
     fn restart(&mut self, expected: &Version) -> Result<(), UpdateError>;
+    /// 安裝紀錄的 `auto_update`。
+    fn auto_update(&mut self) -> Result<bool, UpdateError>;
+    /// 記下這次檢查或更新的結果(狀態檔與紀錄檔)。
+    fn record_result(&mut self, record: &UpdateRecord);
+    fn last_result(&mut self) -> Option<UpdateRecord>;
 }
 
 /// 以 HTTP 取 Release(正式是 GitHub)。
@@ -223,6 +260,14 @@ pub struct HttpReleaseSource {
 }
 
 impl HttpReleaseSource {
+    /// `PURRDR_HOST_SERVICE_RELEASE_URL`(測試與實機驗證用)有設定時用它，否則 GitHub。
+    pub fn from_environment() -> Self {
+        match std::env::var(RELEASE_URL_VARIABLE) {
+            Ok(base) if !base.trim().is_empty() => HttpReleaseSource::at(&base),
+            _ => HttpReleaseSource::github(),
+        }
+    }
+
     /// `raychiutw/purrdr.host` 的 GitHub Release。
     pub fn github() -> Self {
         HttpReleaseSource {
@@ -303,20 +348,70 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
         Updater { source, location }
     }
 
+    fn record(&mut self, result: String) {
+        self.location.record_result(&UpdateRecord {
+            checked_at: SystemTime::now(),
+            result,
+        });
+    }
+
     /// 已安裝與最新的版本。
     pub fn check(&mut self) -> Result<UpdateCheck, UpdateError> {
         let installed = match self.location.installed_version() {
             Err(UpdateError::NotInstalled) => None,
             installed => Some(installed?),
         };
+        let (auto_update, last_result) = match installed {
+            Some(_) => (Some(self.location.auto_update()?), self.location.last_result()),
+            None => (None, None),
+        };
         Ok(UpdateCheck {
             installed,
             latest: self.source.latest_version(),
+            auto_update,
+            last_result,
         })
     }
 
-    /// 有更大的版本就下載、核對、替換、重啟;新版起不來就退回。
+    /// 背景自動檢查：開啟且有新版時啟動更新程序(由它套用);結果都記下來。
+    pub fn automatic(&mut self, launcher: &mut impl UpdateLauncher) -> AutomaticOutcome {
+        match self.location.auto_update() {
+            Ok(true) => {}
+            Ok(false) => return AutomaticOutcome::Disabled,
+            Err(error) => return AutomaticOutcome::Failed(error),
+        }
+        let outcome = match self.check().and_then(|check| Ok((check.update_available(), check.versions()?))) {
+            Err(error) => AutomaticOutcome::Failed(error),
+            Ok((false, (installed, _))) => AutomaticOutcome::UpToDate(installed),
+            Ok((true, (from, to))) => match launcher.launch() {
+                Ok(()) => AutomaticOutcome::Started { from, to },
+                Err(message) => AutomaticOutcome::Failed(UpdateError::Io(format!("cannot start the update: {message}"))),
+            },
+        };
+        let result = match &outcome {
+            AutomaticOutcome::UpToDate(installed) => format!("up to date ({installed})"),
+            AutomaticOutcome::Started { to, .. } => format!("update to {to} started"),
+            AutomaticOutcome::Failed(error) => format!("check failed: {}", error.summary()),
+            AutomaticOutcome::Disabled => unreachable!("前面已回傳"),
+        };
+        self.record(result);
+        outcome
+    }
+
+    /// 有更大的版本就下載、核對、替換、重啟;新版起不來就退回。結果記下來。
     pub fn apply(&mut self) -> Result<UpdateOutcome, UpdateError> {
+        let applied = self.apply_unrecorded();
+        let result = match &applied {
+            Ok(UpdateOutcome::Updated { from, to }) => format!("updated {from} -> {to}"),
+            Ok(UpdateOutcome::UpToDate { installed, .. }) => format!("up to date ({installed})"),
+            Err(UpdateError::NotInstalled) => return applied,
+            Err(error) => format!("update failed: {}", error.summary()),
+        };
+        self.record(result);
+        applied
+    }
+
+    fn apply_unrecorded(&mut self) -> Result<UpdateOutcome, UpdateError> {
         let check = self.check()?;
         let (installed, latest) = check.versions()?;
         if !check.update_available() {

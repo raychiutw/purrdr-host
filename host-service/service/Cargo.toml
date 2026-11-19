@@ -32,6 +32,8 @@ libc = "0.2.191"
 
 [dev-dependencies]
 futures-util.workspace = true
+# 排程測試以暫停的時鐘推進時間。
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3.27.0"
 tokio-tungstenite.workspace = true
 

@@ -97,6 +97,7 @@ impl TestHost {
             port,
             herdr_session: None,
             https_port: None,
+            auto_update: None,
             source_directory: self.downloads.0.clone(),
         }
     }

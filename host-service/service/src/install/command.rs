@@ -11,8 +11,6 @@ use crate::update::{HttpReleaseSource, UpdateError, UpdateOutcome, Updater};
 
 /// 一行安裝腳本設定的環境變數：重跑安裝的指令(不含選項)。
 pub const INSTALL_COMMAND_VARIABLE: &str = "PURRDR_HOST_SERVICE_INSTALL_COMMAND";
-/// 測試與實機驗證用的 Release 來源(`<base>/releases/latest`);沒設定時是 GitHub。
-pub const RELEASE_URL_VARIABLE: &str = "PURRDR_HOST_SERVICE_RELEASE_URL";
 
 /// 執行子命令並回傳結束碼。
 pub async fn run_command(command: InstallCommand) -> ExitCode {
@@ -25,6 +23,9 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
     }
     if command == InstallCommand::Version {
         return run_version(environment);
+    }
+    if let InstallCommand::AutoUpdate { enabled } = command {
+        return run_auto_update(environment, enabled);
     }
     let source_directory = environment.current_executable.parent().map(|parent| parent.to_path_buf()).unwrap_or_default();
     // 一行安裝腳本傳入重跑用的指令;直接執行時用這支執行檔。
@@ -40,11 +41,13 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
             herdr_session,
             https_port,
             assume_yes,
+            no_auto_update,
         } => {
             let options = InstallOptions {
                 port,
                 herdr_session,
                 https_port,
+                auto_update: no_auto_update.then_some(false),
                 source_directory,
             };
             let confirm = |question: &InstallQuestion| {
@@ -84,6 +87,7 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
             Err(error) => fail(&error),
         },
         InstallCommand::Update { .. } | InstallCommand::Version => unreachable!("前面已處理"),
+        InstallCommand::AutoUpdate { .. } => unreachable!("前面已處理"),
         InstallCommand::Status => {
             println!("{}", installer.status(&SocketEnvironment::from_process()).await);
             ExitCode::SUCCESS
@@ -92,11 +96,7 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
 }
 
 fn updater(environment: HostEnvironment) -> Updater<HttpReleaseSource, InstalledService<ProcessHostSystem>> {
-    let source = match std::env::var(RELEASE_URL_VARIABLE) {
-        Ok(base) if !base.trim().is_empty() => HttpReleaseSource::at(&base),
-        _ => HttpReleaseSource::github(),
-    };
-    Updater::new(source, InstalledService::new(environment, ProcessHostSystem))
+    Updater::new(HttpReleaseSource::from_environment(), InstalledService::new(environment, ProcessHostSystem))
 }
 
 /// `version`:已安裝與最新的版本;取不到最新版也照樣成功。
@@ -117,7 +117,31 @@ fn run_version(environment: HostEnvironment) -> ExitCode {
         Err(UpdateError::Network(message)) => println!("latest: unknown ({message})"),
         Err(error) => println!("latest: unknown ({error})"),
     }
+    if let Some(auto_update) = check.auto_update {
+        println!("auto update: {}", if auto_update { "on" } else { "off" });
+        match &check.last_result {
+            Some(record) => println!("last check: {}, {}", humantime::format_rfc3339_seconds(record.checked_at), record.result),
+            None => println!("last check: never"),
+        }
+    }
     ExitCode::SUCCESS
+}
+
+/// `auto-update on|off`;背景服務下一次檢查時就照新的設定。
+fn run_auto_update(environment: HostEnvironment, enabled: bool) -> ExitCode {
+    let update_command = format!("{} update", shell_quoted(&environment.current_executable, environment.platform));
+    match Installer::new(environment, ProcessHostSystem).set_auto_update(enabled) {
+        Ok(()) if enabled => {
+            println!("Auto update is on. The host service checks for a new release every day and installs it.");
+            ExitCode::SUCCESS
+        }
+        Ok(()) => {
+            println!("Auto update is off. To update by hand, run: {update_command}");
+            ExitCode::SUCCESS
+        }
+        Err(InstallError::NotInstalled) => fail_update(&UpdateError::NotInstalled, &update_command),
+        Err(error) => fail(&error),
+    }
 }
 
 /// `update [--check] [--yes]`。
@@ -136,6 +160,10 @@ fn run_update(environment: HostEnvironment, check_only: bool, assume_yes: bool) 
         Err(error) => return fail_update(&error, &rerun),
     };
     if latest <= installed {
+        // `update` 也算一次檢查，經由套用記下結果;`--check` 不記。
+        if !check_only && let Err(error) = updater.apply() {
+            return fail_update(&error, &rerun);
+        }
         println!("Up to date: {installed} (latest release {latest}).");
         return ExitCode::SUCCESS;
     }

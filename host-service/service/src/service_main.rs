@@ -27,6 +27,8 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
         env!("CARGO_PKG_VERSION"),
         service.local_addr()
     );
+    // 安裝好的那份才會自動更新(開發中直接執行的不會)。
+    let _auto_update = crate::auto_update::spawn_for_installed_service();
     service.wait().await;
     ExitCode::SUCCESS
 }

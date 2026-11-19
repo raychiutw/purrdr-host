@@ -1,4 +1,4 @@
-//! 主機服務的手動更新(raychiutw/purrdr.host#6):假 Release 伺服器加暫存家目錄與假系統，三平台流程都在每個 CI 平台跑。
+//! 主機服務的更新(raychiutw/purrdr.host#6、#7):假 Release 伺服器加暫存家目錄與假系統，三平台流程都在每個 CI 平台跑。
 
 mod install_support;
 
@@ -7,7 +7,7 @@ use std::time::Duration;
 use install_support::release::{FakeReleaseServer, sha256_hex};
 use install_support::{FakeSystem, TestHost, executable_names, fake_host_service, snapshot};
 use purrdr_host_service::install::{InstallPlatform, InstalledService, Installer};
-use purrdr_host_service::update::{HttpReleaseSource, UpdateError, UpdateOutcome, Updater, Version};
+use purrdr_host_service::update::{AutomaticOutcome, HttpReleaseSource, UpdateError, UpdateLauncher, UpdateOutcome, Updater, Version};
 
 const PLATFORMS: [InstallPlatform; 3] = [InstallPlatform::MacOs, InstallPlatform::Linux, InstallPlatform::Windows];
 const INSTALLED: &str = "0.5.0";
@@ -70,6 +70,27 @@ impl InstalledHost {
     }
 }
 
+/// 家目錄快照，不含更新結果的紀錄(`update.json`、`logs/update.log`)。
+fn home_without_update_record(host: &TestHost) -> std::collections::BTreeMap<String, Option<String>> {
+    let mut entries = snapshot(&host.home.0);
+    entries.retain(|path, _| !path.ends_with(".purrdr/host-service/update.json") && !path.ends_with(".purrdr/host-service/logs/update.log"));
+    entries
+}
+
+/// 記下被要求啟動更新程序幾次的假啟動器。
+#[derive(Default)]
+struct FakeLauncher {
+    launches: usize,
+    fails: bool,
+}
+
+impl UpdateLauncher for FakeLauncher {
+    fn launch(&mut self) -> Result<(), String> {
+        self.launches += 1;
+        if self.fails { Err("spawn failed".into()) } else { Ok(()) }
+    }
+}
+
 fn publish(server: &FakeReleaseServer, platform: InstallPlatform, version: &str, traits: &str) {
     let executables: Vec<(&str, String)> = executable_names(platform)
         .into_iter()
@@ -122,7 +143,7 @@ fn same_or_older_release_changes_nothing() {
             let mut installed = InstalledHost::new(platform);
             let server = FakeReleaseServer::start();
             publish(&server, platform, latest, "");
-            let home_before = snapshot(&installed.host.home.0);
+            let home_before = home_without_update_record(&installed.host);
             let mut updater = installed.updater(&server);
 
             let outcome = updater.apply().unwrap();
@@ -135,7 +156,7 @@ fn same_or_older_release_changes_nothing() {
                 },
                 "{platform:?}"
             );
-            assert_eq!(snapshot(&installed.host.home.0), home_before, "{platform:?} {latest}");
+            assert_eq!(home_without_update_record(&installed.host), home_before, "{platform:?} {latest}");
             assert_eq!(server.requests(), ["/releases/latest"], "{platform:?} {latest}:不下載");
         }
     }
@@ -149,14 +170,14 @@ fn checksum_mismatch_replaces_nothing() {
         publish(&server, platform, "0.5.1", "");
         let other_archive = format!("{}  {}\n", sha256_hex(b"something else"), install_support::release::asset_name(platform));
         server.put("releases/download/host-service-v0.5.1/SHA256SUMS", other_archive.into_bytes());
-        let home_before = snapshot(&installed.host.home.0);
+        let home_before = home_without_update_record(&installed.host);
         let mut updater = installed.updater(&server);
 
         let error = updater.apply().unwrap_err();
 
         assert!(matches!(error, UpdateError::ChecksumMismatch { .. }), "{platform:?}: {error:?}");
         assert!(error.explain("purrdr-host-service update").contains("Next:"), "{error}");
-        assert_eq!(snapshot(&installed.host.home.0), home_before, "{platform:?}");
+        assert_eq!(home_without_update_record(&installed.host), home_before, "{platform:?}");
         assert!(is_listening(installed.port), "{platform:?}");
     }
 }
@@ -194,7 +215,7 @@ fn unreachable_release_server_is_a_network_error_and_changes_nothing() {
     for platform in PLATFORMS {
         let mut installed = InstalledHost::new(platform);
         let server = FakeReleaseServer::start();
-        let home_before = snapshot(&installed.host.home.0);
+        let home_before = home_without_update_record(&installed.host);
         let mut updater = installed.updater(&server);
         drop(server);
 
@@ -202,7 +223,7 @@ fn unreachable_release_server_is_a_network_error_and_changes_nothing() {
 
         assert!(matches!(error, UpdateError::Network(_)), "{platform:?}: {error:?}");
         assert!(error.explain("purrdr-host-service update").contains("Next:"), "{error}");
-        assert_eq!(snapshot(&installed.host.home.0), home_before, "{platform:?}");
+        assert_eq!(home_without_update_record(&installed.host), home_before, "{platform:?}");
     }
 }
 
@@ -225,12 +246,12 @@ fn missing_release_files_are_a_network_error() {
     let mut installed = InstalledHost::new(InstallPlatform::Linux);
     let server = FakeReleaseServer::start();
     server.put("releases/latest", br#"{"tag_name":"host-service-v0.5.1"}"#.to_vec());
-    let home_before = snapshot(&installed.host.home.0);
+    let home_before = home_without_update_record(&installed.host);
 
     let error = installed.updater(&server).apply().unwrap_err();
 
     assert!(matches!(error, UpdateError::Network(_)), "{error:?}");
-    assert_eq!(snapshot(&installed.host.home.0), home_before);
+    assert_eq!(home_without_update_record(&installed.host), home_before);
 }
 
 #[test]
@@ -238,14 +259,14 @@ fn macos_release_without_matching_signature_is_not_installed() {
     let mut installed = InstalledHost::new(InstallPlatform::MacOs);
     let server = FakeReleaseServer::start();
     publish(&server, InstallPlatform::MacOs, "0.5.1", "unsigned");
-    let home_before = snapshot(&installed.host.home.0);
+    let home_before = home_without_update_record(&installed.host);
     let mut updater = installed.updater(&server);
 
     let error = updater.apply().unwrap_err();
 
     assert!(matches!(error, UpdateError::Signature(_)), "{error:?}");
     assert!(error.explain("purrdr-host-service update").contains("Next:"), "{error}");
-    assert_eq!(snapshot(&installed.host.home.0), home_before);
+    assert_eq!(home_without_update_record(&installed.host), home_before);
     assert!(is_listening(installed.port));
 }
 
@@ -254,13 +275,13 @@ fn check_reports_installed_and_latest_versions_without_changes() {
     let mut installed = InstalledHost::new(InstallPlatform::Linux);
     let server = FakeReleaseServer::start();
     publish(&server, InstallPlatform::Linux, "0.10.0", "");
-    let home_before = snapshot(&installed.host.home.0);
+    let home_before = home_without_update_record(&installed.host);
 
     let check = installed.updater(&server).check().unwrap();
 
     assert_eq!((check.installed, check.latest.clone()), (Some(version(INSTALLED)), Ok(version("0.10.0"))));
     assert!(check.update_available());
-    assert_eq!(snapshot(&installed.host.home.0), home_before);
+    assert_eq!(home_without_update_record(&installed.host), home_before);
 }
 
 #[test]
@@ -321,4 +342,122 @@ fn rollback_message_has_one_next_step() {
     let message = updater.apply().unwrap_err().explain("purrdr-host-service update");
 
     assert_eq!(message.matches("Next:").count(), 1, "{message}");
+}
+
+#[test]
+fn applying_records_the_result_and_the_check_reports_it() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "");
+    let mut updater = installed.updater(&server);
+    assert_eq!(updater.check().unwrap().last_result, None);
+
+    updater.apply().unwrap();
+
+    let check = updater.check().unwrap();
+    assert_eq!(check.auto_update, Some(true));
+    assert_eq!(check.last_result.unwrap().result, "updated 0.5.0 -> 0.5.1");
+    let log = std::fs::read_to_string(installed.host.service_directory().join("logs/update.log")).unwrap();
+    assert!(log.contains("updated 0.5.0 -> 0.5.1"), "{log}");
+}
+
+#[test]
+fn automatic_check_launches_the_update_when_a_newer_release_exists() {
+    for platform in PLATFORMS {
+        let mut installed = InstalledHost::new(platform);
+        let server = FakeReleaseServer::start();
+        publish(&server, platform, "0.5.1", "");
+        let mut updater = installed.updater(&server);
+        let mut launcher = FakeLauncher::default();
+
+        let outcome = updater.automatic(&mut launcher);
+
+        assert_eq!(
+            outcome,
+            AutomaticOutcome::Started {
+                from: version(INSTALLED),
+                to: version("0.5.1")
+            },
+            "{platform:?}"
+        );
+        assert_eq!(launcher.launches, 1, "{platform:?}");
+        assert!(
+            installed
+                .installed_executable(executable_names(platform)[0])
+                .starts_with("fake-host-service 0.5.0 "),
+            "由更新程序替換，不在服務裡換"
+        );
+        assert_eq!(updater.check().unwrap().last_result.unwrap().result, "update to 0.5.1 started");
+    }
+}
+
+#[test]
+fn automatic_check_does_nothing_when_auto_update_is_off_but_manual_update_still_works() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let mut installer = Installer::new(installed.host.environment(), FakeSystem::ready(&installed.host.home.0));
+    installer.set_auto_update(false).unwrap();
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "");
+    let mut updater = installed.updater(&server);
+    let mut launcher = FakeLauncher::default();
+
+    let outcome = updater.automatic(&mut launcher);
+
+    assert_eq!(outcome, AutomaticOutcome::Disabled);
+    assert_eq!(launcher.launches, 0);
+    assert!(server.requests().is_empty(), "關閉時不連網路：{:?}", server.requests());
+    assert_eq!(updater.check().unwrap().auto_update, Some(false));
+    assert!(matches!(updater.apply(), Ok(UpdateOutcome::Updated { .. })));
+}
+
+#[test]
+fn automatic_check_when_up_to_date_or_offline_launches_nothing_and_records_the_result() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, INSTALLED, "");
+    let mut updater = installed.updater(&server);
+    let mut launcher = FakeLauncher::default();
+
+    let up_to_date = updater.automatic(&mut launcher);
+    assert_eq!(up_to_date, AutomaticOutcome::UpToDate(version(INSTALLED)));
+    assert_eq!(updater.check().unwrap().last_result.unwrap().result, "up to date (0.5.0)");
+    drop(server);
+    let offline = updater.automatic(&mut launcher);
+
+    assert!(matches!(offline, AutomaticOutcome::Failed(UpdateError::Network(_))), "{offline:?}");
+    assert_eq!(launcher.launches, 0);
+    let last = updater.check().unwrap().last_result.unwrap().result;
+    assert!(last.starts_with("check failed: "), "{last}");
+}
+
+#[test]
+fn automatic_check_reports_a_launcher_that_cannot_start() {
+    let mut installed = InstalledHost::new(InstallPlatform::Windows);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Windows, "0.5.1", "");
+    let mut updater = installed.updater(&server);
+    let mut launcher = FakeLauncher {
+        fails: true,
+        ..FakeLauncher::default()
+    };
+
+    let outcome = updater.automatic(&mut launcher);
+
+    assert!(matches!(outcome, AutomaticOutcome::Failed(UpdateError::Io(_))), "{outcome:?}");
+}
+
+#[test]
+fn only_the_installed_copy_runs_automatic_updates() {
+    let installed = InstalledHost::new(InstallPlatform::Linux);
+    let mut from_installed_copy = installed.host.environment();
+    from_installed_copy.current_executable = installed.host.service_directory().join("bin").join("purrdr-host-service");
+
+    let downloaded = InstalledService::new(installed.host.environment(), FakeSystem::ready(&installed.host.home.0));
+    let in_place = InstalledService::new(from_installed_copy, FakeSystem::ready(&installed.host.home.0));
+    let not_installed_host = TestHost::new(InstallPlatform::Linux);
+    let not_installed = InstalledService::new(not_installed_host.environment(), FakeSystem::ready(&not_installed_host.home.0));
+
+    assert!(!downloaded.runs_installed_copy());
+    assert!(in_place.runs_installed_copy());
+    assert!(!not_installed.runs_installed_copy());
 }

@@ -26,6 +26,19 @@ irm https://github.com/raychiutw/purrdr.host/releases/latest/download/install.ps
 
 腳本會下載這台電腦的執行檔、以 `SHA256SUMS` 驗證，再執行 `purrdr-host-service install`(檢查 Tailscale、設定自動啟動，不需要 sudo／系統管理員)。完整說明(前置條件、配對、更新與解除安裝):https://raychiutw.github.io/purrdr/host-service/
 
+### 更新
+
+主機服務預設會自動更新：背景服務啟動後幾分鐘先檢查一次，之後每天檢查 `raychiutw/purrdr.host` 的最新 Release，有新版就下載、以 `SHA256SUMS` 驗證(macOS 另驗 Developer ID 簽章)、替換並重新啟動;新版起不來會自動退回原版本。設定、HTTPS 埠與已配對的裝置都會保留。
+
+```sh
+purrdr-host-service version          # 已安裝與最新版本、自動更新開關、上次檢查的時間與結果
+purrdr-host-service update --check   # 只檢查有沒有新版
+purrdr-host-service update           # 立刻更新(--yes 不詢問)
+purrdr-host-service auto-update off  # 關閉自動更新(on 再打開);安裝時也可以加 --no-auto-update
+```
+
+0.4.x 以前沒有更新功能：重跑一次上面的安裝指令(會保留已配對的裝置),之後就會自動更新。
+
 ### 開發
 
 需要 Rust stable。workspace 在 `host-service/`:
@@ -63,6 +76,19 @@ irm https://github.com/raychiutw/purrdr.host/releases/latest/download/install.ps
 ```
 
 The script downloads the build for your computer, verifies it against `SHA256SUMS`, then runs `purrdr-host-service install` (checks Tailscale and sets up autostart; no sudo or administrator needed). Full guide (requirements, pairing, updating and uninstalling): https://raychiutw.github.io/purrdr/host-service/
+
+### Updating
+
+The host service updates itself by default: a few minutes after it starts, and then every day, it checks the latest release of `raychiutw/purrdr.host`; when there is a newer one it downloads it, verifies it against `SHA256SUMS` (and the Developer ID signature on macOS), replaces itself and restarts. If the new version does not start, it goes back to the previous one. Settings, the HTTPS port and paired devices are kept.
+
+```sh
+purrdr-host-service version          # installed and latest version, auto update on/off, last check and its result
+purrdr-host-service update --check   # only check for a newer release
+purrdr-host-service update           # update now (--yes skips the question)
+purrdr-host-service auto-update off  # turn auto update off (on turns it back on); or install with --no-auto-update
+```
+
+Versions 0.4.x and earlier cannot update themselves: run the install command above once more (paired devices are kept), and it updates itself from then on.
 
 ### Development
 

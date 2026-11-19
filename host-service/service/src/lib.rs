@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub mod audit_log;
+pub mod auto_update;
 mod connection;
 pub mod device_store;
 pub mod herdr_cli;
