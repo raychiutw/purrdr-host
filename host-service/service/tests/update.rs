@@ -292,3 +292,33 @@ fn versions_compare_numerically_and_parse_release_tags() {
     }
     assert_eq!(version("0.5.1").to_string(), "0.5.1");
 }
+
+#[test]
+fn service_that_cannot_be_restarted_at_all_asks_to_reinstall_with_one_next_step() {
+    for platform in PLATFORMS {
+        let mut installed = InstalledHost::new(platform);
+        installed.system.as_mut().unwrap().autostart_fails = true;
+        let server = FakeReleaseServer::start();
+        publish(&server, platform, "0.5.1", "");
+        let mut updater = installed.updater(&server);
+
+        let error = updater.apply().unwrap_err();
+
+        assert!(matches!(error, UpdateError::RollbackFailed { .. }), "{platform:?}: {error:?}");
+        let message = error.explain("purrdr-host-service update");
+        assert_eq!(message.matches("Next:").count(), 1, "{message}");
+        assert!(message.contains("install"), "{message}");
+    }
+}
+
+#[test]
+fn rollback_message_has_one_next_step() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "broken");
+    let mut updater = installed.updater(&server);
+
+    let message = updater.apply().unwrap_err().explain("purrdr-host-service update");
+
+    assert_eq!(message.matches("Next:").count(), 1, "{message}");
+}

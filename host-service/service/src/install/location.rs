@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::system::HostSystem;
-use super::{HostEnvironment, InstallPlatform, InstallRecord, ServiceLayout, autostart, read_install_record, service_arguments};
+use super::{HostEnvironment, InstallError, InstallPlatform, InstallRecord, ServiceLayout, autostart, read_install_record, service_arguments};
 use crate::update::{InstallLocation, UpdateError, Version};
 
 /// 替換時留下的舊執行檔副檔名。
@@ -44,9 +44,7 @@ impl<S: HostSystem> InstalledService<S> {
     }
 
     fn record(&self) -> Result<InstallRecord, UpdateError> {
-        read_install_record(&self.layout())
-            .map_err(|error| UpdateError::Io(error.to_string()))?
-            .ok_or(UpdateError::NotInstalled)
+        read_install_record(&self.layout()).map_err(install_failure)?.ok_or(UpdateError::NotInstalled)
     }
 
     fn executable_version(&mut self, executable: &Path) -> Result<Version, String> {
@@ -70,7 +68,7 @@ impl<S: HostSystem> InstalledService<S> {
 
     fn stop(&mut self) -> Result<(), UpdateError> {
         let layout = self.layout();
-        autostart::unregister(&mut self.system, &layout, self.environment.user_name.as_deref()).map_err(|error| UpdateError::Io(error.to_string()))
+        autostart::unregister(&mut self.system, &layout, self.environment.user_name.as_deref()).map_err(install_failure)
     }
 
     fn previous(executable: &Path) -> PathBuf {
@@ -165,7 +163,7 @@ impl<S: HostSystem> InstallLocation for InstalledService<S> {
         // 舊行程放開埠之後才啟動，確認聽埠的是新版。
         wait_until(Instant::now() + self.start_timeout, || !is_listening(&address));
         let layout = self.layout();
-        autostart::register(&mut self.system, &layout, &service_arguments(&record)).map_err(|error| UpdateError::Io(error.to_string()))?;
+        autostart::register(&mut self.system, &layout, &service_arguments(&record)).map_err(install_failure)?;
         let reported = self.executable_version(&layout.executable()).map_err(UpdateError::Io)?;
         if reported != *expected {
             return Err(UpdateError::Io(format!("the installed host service reports {reported}, expected {expected}")));
@@ -177,6 +175,14 @@ impl<S: HostSystem> InstallLocation for InstalledService<S> {
             )));
         }
         Ok(())
+    }
+}
+
+/// 安裝流程的錯誤只取「發生什麼」;下一步由更新流程的訊息給。
+fn install_failure(error: InstallError) -> UpdateError {
+    match error {
+        InstallError::Autostart(message) | InstallError::Io(message) | InstallError::Tailscale(message) => UpdateError::Io(message),
+        other => UpdateError::Io(other.to_string().lines().next().unwrap_or_default().to_owned()),
     }
 }
 

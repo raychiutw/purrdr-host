@@ -135,6 +135,16 @@ impl UpdateError {
     }
 }
 
+impl UpdateError {
+    /// 不含下一步的一句話(放進別的訊息裡用)。
+    pub fn summary(&self) -> String {
+        match self {
+            UpdateError::Io(message) | UpdateError::Network(message) | UpdateError::Signature(message) => message.clone(),
+            other => other.explain("").lines().next().unwrap_or_default().to_owned(),
+        }
+    }
+}
+
 impl std::fmt::Display for UpdateError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}", self.explain("purrdr-host-service update"))
@@ -326,10 +336,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
         replaced?;
 
         if let Err(error) = self.location.restart(&latest) {
-            let reason = match error {
-                UpdateError::Io(message) => message,
-                other => other.to_string(),
-            };
+            let reason = error.summary();
             return match self.location.restore().and_then(|()| self.location.restart(&installed)) {
                 Ok(()) => Err(UpdateError::RolledBack {
                     failed: latest,
@@ -338,7 +345,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
                 }),
                 Err(rollback) => Err(UpdateError::RollbackFailed {
                     failed: latest,
-                    reason: rollback.to_string(),
+                    reason: rollback.summary(),
                 }),
             };
         }
