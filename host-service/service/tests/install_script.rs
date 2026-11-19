@@ -219,9 +219,9 @@ fn missing_checksum_entry_aborts() {
     assert!(run.temporary_is_empty(), "暫存資料夾沒清掉");
 }
 
-/// 兩支腳本都從本 repo(raychiutw/purrdr-host)的 Release 下載，用法註解也指向同一處。
+/// 兩支腳本都從本 repo(raychiutw/purrdr.host)的 Release 下載，用法註解也指向同一處。
 fn scripts_download_from_this_repository() {
-    const REPOSITORY: &str = "https://github.com/raychiutw/purrdr-host";
+    const REPOSITORY: &str = "https://github.com/raychiutw/purrdr.host";
     for name in ["install.sh", "install.ps1"] {
         let script = std::fs::read_to_string(scripts_directory().join(name)).unwrap();
         assert!(
@@ -230,6 +230,7 @@ fn scripts_download_from_this_repository() {
         );
         assert!(script.contains(&format!("{REPOSITORY}/releases/latest/download/{name}")), "{name} 的用法註解");
         assert!(!script.contains("github.com/raychiutw/purrdr.ios"), "{name} 還從 app repo 下載");
+        assert!(!script.contains("github.com/raychiutw/purrdr-host"), "{name} 還用改名前的 repo 網址");
     }
 }
 
@@ -240,9 +241,9 @@ fn install_command_for_rerun_is_passed_to_the_host_service() {
 
     let record = run.record().expect("沒有執行壓縮檔裡的主機服務");
     let expected = if cfg!(windows) {
-        "rerun: & ([scriptblock]::Create((irm https://github.com/raychiutw/purrdr-host/releases/latest/download/install.ps1)))"
+        "rerun: & ([scriptblock]::Create((irm https://github.com/raychiutw/purrdr.host/releases/latest/download/install.ps1)))"
     } else {
-        "rerun: curl -fsSL https://github.com/raychiutw/purrdr-host/releases/latest/download/install.sh | sh -s --"
+        "rerun: curl -fsSL https://github.com/raychiutw/purrdr.host/releases/latest/download/install.sh | sh -s --"
     };
     assert!(record.lines().any(|line| line == expected), "{record}");
 }
@@ -255,9 +256,9 @@ fn pinned_version_is_shown_quoted_in_the_rerun_command() {
 
     let record = run.record().expect("沒有執行壓縮檔裡的主機服務");
     let expected = if cfg!(windows) {
-        "rerun: $env:PURRDR_HOST_SERVICE_VERSION = '0.4.0''; echo pwned #'; & ([scriptblock]::Create((irm https://github.com/raychiutw/purrdr-host/releases/latest/download/install.ps1)))"
+        "rerun: $env:PURRDR_HOST_SERVICE_VERSION = '0.4.0''; echo pwned #'; & ([scriptblock]::Create((irm https://github.com/raychiutw/purrdr.host/releases/latest/download/install.ps1)))"
     } else {
-        r"rerun: curl -fsSL https://github.com/raychiutw/purrdr-host/releases/latest/download/install.sh | PURRDR_HOST_SERVICE_VERSION='0.4.0'\''; echo pwned #' sh -s --"
+        r"rerun: curl -fsSL https://github.com/raychiutw/purrdr.host/releases/latest/download/install.sh | PURRDR_HOST_SERVICE_VERSION='0.4.0'\''; echo pwned #' sh -s --"
     };
     assert!(record.lines().any(|line| line == expected), "{record}");
 }

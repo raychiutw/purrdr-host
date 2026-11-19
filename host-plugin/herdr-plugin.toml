@@ -1,6 +1,6 @@
 # Purrdr 主機外掛(ADR-0004):Agent 進入「需要你」時，通知 Purrdr 後台推播到配對的 iPhone／iPad。
 #
-# 由 Purrdr app 經 SSH 以 `herdr plugin install raychiutw/purrdr-host/host-plugin --yes` 安裝，
+# 由 Purrdr app 經 SSH 以 `herdr plugin install raychiutw/purrdr.host/host-plugin --yes` 安裝，
 # 配對資料在 ~/.purrdr/push-<裝置>/pairing(由 app 寫入、關閉推播時移除)。
 # 推播只帶 workspace 名稱、狀態與 pane id,不帶任何對話內容。
 id = "purrdr.push"

@@ -1,6 +1,6 @@
 # Purrdr 主機服務的一行安裝(Windows,raychiutw/purrdr.ios#198):
 #
-#   irm https://github.com/raychiutw/purrdr-host/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/raychiutw/purrdr.host/releases/latest/download/install.ps1 | iex
 #   & ([scriptblock]::Create((irm …/install.ps1))) --yes --port 47820   # 參數原樣交給 `purrdr-host-service install`
 #   & ([scriptblock]::Create((irm …/install.ps1))) --https-port 8443     # HTTPS 443 已被其他 `tailscale serve` 服務使用時
 #
@@ -20,7 +20,7 @@
     $ProgressPreference = 'SilentlyContinue'
     $installArguments = @($args)
 
-    $repository = 'https://github.com/raychiutw/purrdr-host'
+    $repository = 'https://github.com/raychiutw/purrdr.host'
     # 重跑這個安裝的指令(主機服務的錯誤訊息用它組出「下一步」)。
     $rerun = "& ([scriptblock]::Create((irm $repository/releases/latest/download/install.ps1)))"
     if ($env:PURRDR_HOST_SERVICE_VERSION) {
