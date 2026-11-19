@@ -16,15 +16,51 @@ fn plugin_directory() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../host-plugin")
 }
 
-/// manifest:只掛 pane.agent_status_changed,macOS／Linux 用 sh、Windows 用 PowerShell 腳本(檔案都在)
+/// manifest:只掛 pane.agent_status_changed,macOS／Linux 用 sh、Windows 用 PowerShell 腳本(檔案都在)。
+/// 解析 TOML 逐一比對每個事件：同一個事件名出現兩次，用字串 `contains` 會放過只改壞其中一個的情況。
 #[test]
 fn manifest_declares_hooks() {
-    let manifest = std::fs::read_to_string(plugin_directory().join("herdr-plugin.toml")).unwrap();
-    assert!(manifest.contains(&format!(r#"id = "{PLUGIN_ID}""#)));
-    assert!(manifest.contains(r#"on = "pane.agent_status_changed""#));
-    assert!(manifest.contains(r#"command = ["sh", "notify.sh"]"#));
-    assert!(manifest.contains("notify.ps1"));
-    assert!(plugin_directory().join("notify.ps1").is_file());
+    let text = std::fs::read_to_string(plugin_directory().join("herdr-plugin.toml")).unwrap();
+    let manifest: toml::Table = text.parse().unwrap();
+    assert_eq!(manifest["id"].as_str(), Some(PLUGIN_ID));
+
+    let events = manifest["events"].as_array().expect("沒有 [[events]]");
+    let hooks: Vec<(&str, Vec<&str>, Vec<&str>)> = events
+        .iter()
+        .map(|event| {
+            let strings = |key: &str| -> Vec<&str> {
+                event[key]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("事件缺 {key}"))
+                    .iter()
+                    .map(|value| value.as_str().unwrap())
+                    .collect()
+            };
+            (event["on"].as_str().expect("事件缺 on"), strings("command"), strings("platforms"))
+        })
+        .collect();
+    assert_eq!(
+        hooks,
+        vec![
+            ("pane.agent_status_changed", vec!["sh", "notify.sh"], vec!["linux", "macos"]),
+            (
+                "pane.agent_status_changed",
+                vec![
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    "notify.ps1"
+                ],
+                vec!["windows"],
+            ),
+        ]
+    );
+    for script in ["notify.sh", "notify.ps1"] {
+        assert!(plugin_directory().join(script).is_file(), "缺 {script}");
+    }
 }
 
 #[cfg(unix)]
