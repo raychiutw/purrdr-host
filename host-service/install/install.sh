@@ -1,7 +1,7 @@
 #!/bin/sh
 # Purrdr 主機服務的一行安裝(macOS、Linux,raychiutw/purrdr.ios#198):
 #
-#   curl -fsSL https://github.com/raychiutw/purrdr-host/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/raychiutw/purrdr.host/releases/latest/download/install.sh | sh
 #   curl -fsSL …/install.sh | sh -s -- --yes --port 47820     # 參數原樣交給 `purrdr-host-service install`
 #   curl -fsSL …/install.sh | sh -s -- --https-port 8443      # HTTPS 443 已被其他 `tailscale serve` 服務使用時
 #
@@ -14,7 +14,7 @@
 #   PURRDR_HOST_SERVICE_DOWNLOAD_URL  下載來源(網址或本機資料夾;測試用)
 set -eu
 
-repository="https://github.com/raychiutw/purrdr-host"
+repository="https://github.com/raychiutw/purrdr.host"
 
 # 重跑這個安裝的指令(主機服務的錯誤訊息用它組出「下一步」)。
 rerun="curl -fsSL $repository/releases/latest/download/install.sh | sh -s --"

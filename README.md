@@ -1,4 +1,4 @@
-# purrdr-host
+# purrdr.host
 
 [繁體中文](#繁體中文) · [English](#english)
 
@@ -15,13 +15,13 @@
 macOS／Linux:
 
 ```sh
-curl -fsSL https://github.com/raychiutw/purrdr-host/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/raychiutw/purrdr.host/releases/latest/download/install.sh | sh
 ```
 
 Windows(PowerShell):
 
 ```powershell
-irm https://github.com/raychiutw/purrdr-host/releases/latest/download/install.ps1 | iex
+irm https://github.com/raychiutw/purrdr.host/releases/latest/download/install.ps1 | iex
 ```
 
 腳本會下載這台電腦的執行檔、以 `SHA256SUMS` 驗證，再執行 `purrdr-host-service install`(檢查 Tailscale、設定自動啟動，不需要 sudo／系統管理員)。完整說明(前置條件、配對、更新與解除安裝):https://raychiutw.github.io/purrdr/host-service/
@@ -53,13 +53,13 @@ Host-side components of [Purrdr](https://github.com/raychiutw/purrdr.ios): they 
 macOS / Linux:
 
 ```sh
-curl -fsSL https://github.com/raychiutw/purrdr-host/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/raychiutw/purrdr.host/releases/latest/download/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://github.com/raychiutw/purrdr-host/releases/latest/download/install.ps1 | iex
+irm https://github.com/raychiutw/purrdr.host/releases/latest/download/install.ps1 | iex
 ```
 
 The script downloads the build for your computer, verifies it against `SHA256SUMS`, then runs `purrdr-host-service install` (checks Tailscale and sets up autostart; no sudo or administrator needed). Full guide (requirements, pairing, updating and uninstalling): https://raychiutw.github.io/purrdr/host-service/
