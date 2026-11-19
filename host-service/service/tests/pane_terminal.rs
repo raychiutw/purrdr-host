@@ -21,7 +21,7 @@ use tempfile::TempDir;
 const FAKE_HERDR: &str = "fake-herdr";
 
 fn fixtures_directory() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/PurrdrTestSupport/Fixtures/herdr-0.9.5/session-control")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/herdr-0.9.5/session-control")
 }
 
 fn fixture_lines(name: &str) -> Vec<Value> {

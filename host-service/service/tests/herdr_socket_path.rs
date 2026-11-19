@@ -102,7 +102,7 @@ fn windows_default_session_is_a_named_pipe_under_app_data() {
 
 #[test]
 fn windows_named_session_pipe_matches_recorded_herdr_path() {
-    // tests/PurrdrTestSupport/Fixtures/herdr-0.9.5/windows/error.server-not-running.stderr.txt 錄到的路徑。
+    // fixtures/herdr-0.9.5/windows/error.server-not-running.stderr.txt 錄到的路徑。
     let socket = HerdrSocket::resolve(Platform::Windows, Some("purrdr-nosuch"), &windows_environment()).unwrap();
 
     assert_eq!(socket.path(), r"C:\Users\demo\AppData\Roaming\herdr\sessions\purrdr-nosuch\herdr.sock");
