@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 
 mod autostart;
 mod command;
+mod location;
 pub mod system;
 mod tailscale;
 
 pub use command::run_command;
+pub use location::InstalledService;
 use system::HostSystem;
 use tailscale::Tailscale;
 
@@ -143,22 +145,43 @@ pub enum InstallCommand {
     },
     Uninstall,
     Status,
+    /// `update [--check] [--yes]`:更新到最新版(raychiutw/purrdr.host#6)。
+    Update {
+        check_only: bool,
+        assume_yes: bool,
+    },
+    /// `version`:已安裝與最新的版本。
+    Version,
 }
 
 impl InstallCommand {
-    /// 第一個參數是 `install`／`uninstall`／`status` 時解析;其他交給主機服務本身。
+    /// 第一個參數是 `install`／`uninstall`／`status`／`update`／`version` 時解析;其他交給主機服務本身。
     pub fn parse(arguments: &[String]) -> Option<Result<Self, String>> {
         let (name, options) = arguments.split_first()?;
         let command = match name.as_str() {
             "install" => Self::parse_install(options),
-            "uninstall" | "status" => match options.first() {
+            "uninstall" | "status" | "version" => match options.first() {
                 Some(extra) => Err(format!("unknown argument: {extra}")),
                 None if name == "status" => Ok(InstallCommand::Status),
+                None if name == "version" => Ok(InstallCommand::Version),
                 None => Ok(InstallCommand::Uninstall),
             },
+            "update" => Self::parse_update(options),
             _ => return None,
         };
         Some(command)
+    }
+
+    fn parse_update(options: &[String]) -> Result<Self, String> {
+        let (mut check_only, mut assume_yes) = (false, false);
+        for option in options {
+            match option.as_str() {
+                "--check" => check_only = true,
+                "--yes" => assume_yes = true,
+                other => return Err(format!("unknown argument: {other}")),
+            }
+        }
+        Ok(InstallCommand::Update { check_only, assume_yes })
     }
 
     fn parse_install(options: &[String]) -> Result<Self, String> {
@@ -415,6 +438,14 @@ pub(crate) struct ServiceLayout {
 }
 
 impl ServiceLayout {
+    fn of(environment: &HostEnvironment) -> Self {
+        ServiceLayout {
+            platform: environment.platform,
+            home: environment.home.clone(),
+            xdg_config_home: environment.xdg_config_home.clone(),
+        }
+    }
+
     fn directory(&self) -> PathBuf {
         crate::state_directory::default_state_directory(&self.home)
     }
@@ -515,12 +546,13 @@ impl<S: HostSystem> Installer<S> {
         &self.system
     }
 
+    /// 取回安裝用的系統(測試接著交給更新流程)。
+    pub fn into_system(self) -> S {
+        self.system
+    }
+
     fn layout(&self) -> ServiceLayout {
-        ServiceLayout {
-            platform: self.environment.platform,
-            home: self.environment.home.clone(),
-            xdg_config_home: self.environment.xdg_config_home.clone(),
-        }
+        ServiceLayout::of(&self.environment)
     }
 
     /// 檢查前置條件、複製執行檔、設定 `tailscale serve` 與登入後自動啟動。
@@ -626,13 +658,7 @@ impl<S: HostSystem> Installer<S> {
     }
 
     fn read_record(&self, layout: &ServiceLayout) -> Result<Option<InstallRecord>, InstallError> {
-        let text = match std::fs::read_to_string(layout.record_file()) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            result => result.map_err(InstallError::io)?,
-        };
-        serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|error| InstallError::Io(format!("{}: {error}", layout.record_file().display())))
+        read_install_record(layout)
     }
 
     /// 安裝的每一步;`record` 隨時反映已做的變更，失敗時依它還原。
@@ -780,6 +806,17 @@ impl<S: HostSystem> Installer<S> {
             record.created_directories.push(relative.to_string_lossy().replace('\\', "/"));
         }
     }
+}
+
+/// 讀安裝紀錄;沒有安裝時回 None。
+fn read_install_record(layout: &ServiceLayout) -> Result<Option<InstallRecord>, InstallError> {
+    let text = match std::fs::read_to_string(layout.record_file()) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        result => result.map_err(InstallError::io)?,
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|error| InstallError::Io(format!("{}: {error}", layout.record_file().display())))
 }
 
 async fn is_listening(port: u16) -> bool {

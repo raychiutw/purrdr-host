@@ -39,6 +39,28 @@ fn install_subcommands_are_parsed() {
         }))
     );
     assert_eq!(InstallCommand::parse(&arguments("uninstall")), Some(Ok(InstallCommand::Uninstall)));
+    assert_eq!(
+        InstallCommand::parse(&arguments("update")),
+        Some(Ok(InstallCommand::Update {
+            check_only: false,
+            assume_yes: false
+        }))
+    );
+    assert_eq!(
+        InstallCommand::parse(&arguments("update --check")),
+        Some(Ok(InstallCommand::Update {
+            check_only: true,
+            assume_yes: false
+        }))
+    );
+    assert_eq!(
+        InstallCommand::parse(&arguments("update --yes")),
+        Some(Ok(InstallCommand::Update {
+            check_only: false,
+            assume_yes: true
+        }))
+    );
+    assert_eq!(InstallCommand::parse(&arguments("version")), Some(Ok(InstallCommand::Version)));
     assert_eq!(InstallCommand::parse(&arguments("status")), Some(Ok(InstallCommand::Status)));
 }
 
@@ -55,6 +77,9 @@ fn other_arguments_are_left_to_the_service_or_rejected() {
         "install --https-port https",
         "uninstall --force",
         "status extra",
+        "update --force",
+        "update now",
+        "version --check",
     ] {
         assert!(matches!(InstallCommand::parse(&arguments(text)), Some(Err(_))), "{text}");
     }

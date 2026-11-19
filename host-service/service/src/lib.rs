@@ -21,6 +21,7 @@ pub mod protocol;
 pub mod state_directory;
 pub mod transcript;
 mod transcript_session;
+pub mod update;
 
 mod service_main;
 

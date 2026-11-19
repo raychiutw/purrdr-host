@@ -1,14 +1,18 @@
-//! `install`／`uninstall`／`status` 子命令：接上真正的系統與終端機。
+//! `install`／`uninstall`／`status`／`update`／`version` 子命令：接上真正的系統與終端機。
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
+use super::location::InstalledService;
 use super::system::ProcessHostSystem;
 use super::{HostEnvironment, InstallCommand, InstallError, InstallOptions, InstallQuestion, Installer, rerun_install_command, shell_quoted};
 use crate::herdr_socket::SocketEnvironment;
+use crate::update::{HttpReleaseSource, UpdateError, UpdateOutcome, Updater};
 
 /// 一行安裝腳本設定的環境變數：重跑安裝的指令(不含選項)。
 pub const INSTALL_COMMAND_VARIABLE: &str = "PURRDR_HOST_SERVICE_INSTALL_COMMAND";
+/// 測試與實機驗證用的 Release 來源(`<base>/releases/latest`);沒設定時是 GitHub。
+pub const RELEASE_URL_VARIABLE: &str = "PURRDR_HOST_SERVICE_RELEASE_URL";
 
 /// 執行子命令並回傳結束碼。
 pub async fn run_command(command: InstallCommand) -> ExitCode {
@@ -16,6 +20,12 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
         Ok(environment) => environment,
         Err(error) => return fail(&error),
     };
+    if let InstallCommand::Update { check_only, assume_yes } = command {
+        return run_update(environment, check_only, assume_yes);
+    }
+    if command == InstallCommand::Version {
+        return run_version(environment);
+    }
     let source_directory = environment.current_executable.parent().map(|parent| parent.to_path_buf()).unwrap_or_default();
     // 一行安裝腳本傳入重跑用的指令;直接執行時用這支執行檔。
     let rerun_prefix = std::env::var(INSTALL_COMMAND_VARIABLE)
@@ -73,11 +83,96 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
             }
             Err(error) => fail(&error),
         },
+        InstallCommand::Update { .. } | InstallCommand::Version => unreachable!("前面已處理"),
         InstallCommand::Status => {
             println!("{}", installer.status(&SocketEnvironment::from_process()).await);
             ExitCode::SUCCESS
         }
     }
+}
+
+fn updater(environment: HostEnvironment) -> Updater<HttpReleaseSource, InstalledService<ProcessHostSystem>> {
+    let source = match std::env::var(RELEASE_URL_VARIABLE) {
+        Ok(base) if !base.trim().is_empty() => HttpReleaseSource::at(&base),
+        _ => HttpReleaseSource::github(),
+    };
+    Updater::new(source, InstalledService::new(environment, ProcessHostSystem))
+}
+
+/// `version`:已安裝與最新的版本;取不到最新版也照樣成功。
+fn run_version(environment: HostEnvironment) -> ExitCode {
+    let update_command = format!("{} update", shell_quoted(&environment.current_executable, environment.platform));
+    let check = match updater(environment).check() {
+        Ok(check) => check,
+        Err(error) => return fail_update(&error, &update_command),
+    };
+    match check.installed {
+        Some(installed) => println!("installed: {installed}"),
+        None => println!("installed: not installed"),
+    }
+    match &check.latest {
+        Ok(latest) if check.update_available() => println!("latest: {latest} (update available, run: {update_command})"),
+        Ok(latest) if check.installed.is_some() => println!("latest: {latest} (up to date)"),
+        Ok(latest) => println!("latest: {latest}"),
+        Err(UpdateError::Network(message)) => println!("latest: unknown ({message})"),
+        Err(error) => println!("latest: unknown ({error})"),
+    }
+    ExitCode::SUCCESS
+}
+
+/// `update [--check] [--yes]`。
+fn run_update(environment: HostEnvironment, check_only: bool, assume_yes: bool) -> ExitCode {
+    let update_command = format!("{} update", shell_quoted(&environment.current_executable, environment.platform));
+    let mut rerun = update_command.clone();
+    if check_only {
+        rerun.push_str(" --check");
+    }
+    if assume_yes {
+        rerun.push_str(" --yes");
+    }
+    let mut updater = updater(environment);
+    let (installed, latest) = match updater.check().and_then(|check| check.versions()) {
+        Ok(versions) => versions,
+        Err(error) => return fail_update(&error, &rerun),
+    };
+    if latest <= installed {
+        println!("Up to date: {installed} (latest release {latest}).");
+        return ExitCode::SUCCESS;
+    }
+    if check_only {
+        println!("Update available: {installed} -> {latest}");
+        println!("To update, run: {update_command}");
+        return ExitCode::SUCCESS;
+    }
+    println!("Update the host service from {installed} to {latest}? It restarts, so connected devices reconnect after a moment.");
+    let prompt = "Update? [y/N] ";
+    let confirmed = if assume_yes {
+        println!("{prompt}yes (--yes)");
+        true
+    } else {
+        ask(prompt)
+    };
+    if !confirmed {
+        println!();
+        eprintln!("Update cancelled; nothing was changed.");
+        return ExitCode::FAILURE;
+    }
+    match updater.apply() {
+        Ok(UpdateOutcome::Updated { from, to }) => {
+            println!("Updated {from} -> {to}. Settings and paired devices were kept.");
+            ExitCode::SUCCESS
+        }
+        Ok(UpdateOutcome::UpToDate { installed, latest }) => {
+            println!("Up to date: {installed} (latest release {latest}).");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail_update(&error, &rerun),
+    }
+}
+
+fn fail_update(error: &UpdateError, rerun: &str) -> ExitCode {
+    eprintln!("{}", error.explain(rerun));
+    ExitCode::FAILURE
 }
 
 fn fail(error: &InstallError) -> ExitCode {

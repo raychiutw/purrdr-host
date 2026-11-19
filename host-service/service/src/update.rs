@@ -1,0 +1,380 @@
+//! 主機服務的更新流程(raychiutw/purrdr.host#6):「檢查」與「套用」。
+//!
+//! 往外只接兩個介面：Release 來源(`ReleaseSource`)與安裝位置(`InstallLocation`)。
+
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
+
+use crate::install::InstallPlatform;
+
+/// Release tag 的前綴(`host-service-v<版本>`)。
+const TAG_PREFIX: &str = "host-service-v";
+/// 正式的 Release 來源。
+pub const GITHUB_RELEASES: &str = "https://github.com/raychiutw/purrdr.host";
+const GITHUB_LATEST_RELEASE: &str = "https://api.github.com/repos/raychiutw/purrdr.host/releases/latest";
+/// 壓縮檔大小上限(防止下載無止境)。
+const MAXIMUM_DOWNLOAD: u64 = 256 * 1024 * 1024;
+
+/// 語意化版本(只接受 `主.次.修`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Version {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
+impl Version {
+    /// 由 Release tag(`host-service-v<版本>`)取版本。
+    pub fn from_tag(tag: &str) -> Option<Version> {
+        tag.strip_prefix(TAG_PREFIX)?.parse().ok()
+    }
+
+    /// 這個版本的 Release tag。
+    pub fn tag(&self) -> String {
+        format!("{TAG_PREFIX}{self}")
+    }
+
+    /// 由 `purrdr-host-service --version` 的輸出取版本。
+    pub fn from_version_output(output: &str) -> Option<Version> {
+        output.trim().strip_prefix("purrdr-host-service ")?.parse().ok()
+    }
+}
+
+impl std::str::FromStr for Version {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid = || format!("invalid version: {text}");
+        let numbers: Vec<u64> = text
+            .split('.')
+            .map(|part| {
+                if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(invalid());
+                }
+                part.parse().map_err(|_| invalid())
+            })
+            .collect::<Result<_, _>>()?;
+        match numbers.as_slice() {
+            [major, minor, patch] => Ok(Version {
+                major: *major,
+                minor: *minor,
+                patch: *patch,
+            }),
+            _ => Err(invalid()),
+        }
+    }
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// 更新失敗。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateError {
+    NotInstalled,
+    /// 連不到 Release 來源，或檔案不存在。
+    Network(String),
+    /// 下載的壓縮檔與 `SHA256SUMS` 不符(或沒有它的那一行)。
+    ChecksumMismatch {
+        file: String,
+    },
+    /// macOS 的程式碼簽章不符。
+    Signature(String),
+    /// 新版起不來，已換回原版本。
+    RolledBack {
+        failed: Version,
+        restored: Version,
+        reason: String,
+    },
+    /// 新版起不來，換回原版本也失敗。
+    RollbackFailed {
+        failed: Version,
+        reason: String,
+    },
+    Io(String),
+}
+
+impl UpdateError {
+    /// 給使用者的說明，最後一段 `Next:` 是下一步(`rerun` 是重跑更新的指令)。
+    pub fn explain(&self, rerun: &str) -> String {
+        const ISSUES: &str = "https://github.com/raychiutw/purrdr.host/issues";
+        match self {
+            UpdateError::NotInstalled => format!(
+                "The Purrdr host service is not installed, so there is nothing to update.\n\
+                 Next: install it (see {GITHUB_RELEASES}#install-the-host-service):\n  {}",
+                install_command()
+            ),
+            UpdateError::Network(message) => format!(
+                "Could not get the release from GitHub: {message}\nNothing was changed.\n\
+                 Next: check your network, then run again:\n  {rerun}"
+            ),
+            UpdateError::ChecksumMismatch { file } => format!(
+                "{file} does not match SHA256SUMS: the download is incomplete or was altered, so nothing was replaced.\n\
+                 Next: run again:\n  {rerun}\n(if it keeps failing, open an issue at {ISSUES})"
+            ),
+            UpdateError::Signature(message) => format!(
+                "The downloaded host service is not signed by the Purrdr developer ({message}), so nothing was replaced.\n\
+                 Next: run again:\n  {rerun}\n(if it keeps failing, open an issue at {ISSUES})"
+            ),
+            UpdateError::RolledBack { failed, restored, reason } => format!(
+                "Host service {failed} did not start ({reason}), so {restored} was put back and is running again.\n\
+                 Next: open an issue at {ISSUES} with the log in ~/.purrdr/host-service/logs; to try again run:\n  {rerun}"
+            ),
+            UpdateError::RollbackFailed { failed, reason } => format!(
+                "Host service {failed} did not start, and putting the previous version back failed: {reason}\n\
+                 Next: reinstall with:\n  {}",
+                install_command()
+            ),
+            UpdateError::Io(message) => format!("{message}\nNext: fix the problem above, then run again:\n  {rerun}"),
+        }
+    }
+}
+
+impl std::fmt::Display for UpdateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.explain("purrdr-host-service update"))
+    }
+}
+
+/// 這個平台的一行安裝指令。
+fn install_command() -> String {
+    if cfg!(windows) {
+        format!("irm {GITHUB_RELEASES}/releases/latest/download/install.ps1 | iex")
+    } else {
+        format!("curl -fsSL {GITHUB_RELEASES}/releases/latest/download/install.sh | sh")
+    }
+}
+
+fn io_error(error: impl std::fmt::Display) -> UpdateError {
+    UpdateError::Io(error.to_string())
+}
+
+/// 「檢查」的結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateCheck {
+    /// 沒有安裝時 None。
+    pub installed: Option<Version>,
+    /// 取不到(例如沒有網路)時是錯誤。
+    pub latest: Result<Version, UpdateError>,
+}
+
+impl UpdateCheck {
+    /// 只往更大的版本更新。
+    pub fn update_available(&self) -> bool {
+        matches!((&self.installed, &self.latest), (Some(installed), Ok(latest)) if latest > installed)
+    }
+
+    /// 已安裝與最新的版本都要有。
+    pub fn versions(&self) -> Result<(Version, Version), UpdateError> {
+        let installed = self.installed.ok_or(UpdateError::NotInstalled)?;
+        Ok((installed, self.latest.clone()?))
+    }
+}
+
+/// 「套用」的結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    Updated { from: Version, to: Version },
+    UpToDate { installed: Version, latest: Version },
+}
+
+/// Release 來源：最新版本與該版本的檔案。
+pub trait ReleaseSource {
+    fn latest_version(&mut self) -> Result<Version, UpdateError>;
+    fn download(&mut self, version: &Version, file_name: &str) -> Result<Vec<u8>, UpdateError>;
+}
+
+/// 安裝位置：已安裝的版本、替換執行檔與重啟背景服務。
+pub trait InstallLocation {
+    fn platform(&self) -> InstallPlatform;
+    fn installed_version(&mut self) -> Result<Version, UpdateError>;
+    /// 解壓縮用的暫存資料夾(與執行檔同一個檔案系統)。
+    fn staging_directory(&self) -> PathBuf;
+    /// 驗證解開的執行檔(macOS 的 codesign);其他平台不檢查。
+    fn verify(&mut self, staged: &Path) -> Result<(), UpdateError>;
+    /// 以 `staged` 的執行檔替換已安裝的，舊的留一份。
+    fn replace(&mut self, staged: &Path) -> Result<(), UpdateError>;
+    /// 換回留下的舊執行檔。
+    fn restore(&mut self) -> Result<(), UpdateError>;
+    /// 重啟背景服務，限時內確認它在聽且回報 `expected`。
+    fn restart(&mut self, expected: &Version) -> Result<(), UpdateError>;
+}
+
+/// 以 HTTP 取 Release(正式是 GitHub)。
+pub struct HttpReleaseSource {
+    latest_url: String,
+    download_url: String,
+    agent: ureq::Agent,
+}
+
+impl HttpReleaseSource {
+    /// `raychiutw/purrdr.host` 的 GitHub Release。
+    pub fn github() -> Self {
+        HttpReleaseSource {
+            latest_url: GITHUB_LATEST_RELEASE.to_owned(),
+            download_url: format!("{GITHUB_RELEASES}/releases/download"),
+            agent: agent(),
+        }
+    }
+
+    /// `<base>/releases/latest` 與 `<base>/releases/download/<tag>/<檔名>`(測試的假 Release 伺服器)。
+    pub fn at(base: &str) -> Self {
+        let base = base.trim_end_matches('/');
+        HttpReleaseSource {
+            latest_url: format!("{base}/releases/latest"),
+            download_url: format!("{base}/releases/download"),
+            agent: agent(),
+        }
+    }
+
+    fn get(&self, url: &str) -> Result<Vec<u8>, UpdateError> {
+        let network = |error: ureq::Error| UpdateError::Network(format!("{url}: {error}"));
+        let mut response = self.agent.get(url).header("Accept", "application/json").call().map_err(network)?;
+        let mut body = Vec::new();
+        response
+            .body_mut()
+            .as_reader()
+            .take(MAXIMUM_DOWNLOAD)
+            .read_to_end(&mut body)
+            .map_err(|error| UpdateError::Network(format!("{url}: {error}")))?;
+        Ok(body)
+    }
+}
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(120)))
+        .user_agent(concat!("purrdr-host-service/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into()
+}
+
+#[derive(serde::Deserialize)]
+struct LatestRelease {
+    tag_name: String,
+}
+
+impl ReleaseSource for HttpReleaseSource {
+    fn latest_version(&mut self) -> Result<Version, UpdateError> {
+        let body = self.get(&self.latest_url)?;
+        let release: LatestRelease =
+            serde_json::from_slice(&body).map_err(|error| UpdateError::Network(format!("{}: unexpected response: {error}", self.latest_url)))?;
+        Version::from_tag(&release.tag_name).ok_or_else(|| UpdateError::Network(format!("unexpected release tag {}", release.tag_name)))
+    }
+
+    fn download(&mut self, version: &Version, file_name: &str) -> Result<Vec<u8>, UpdateError> {
+        self.get(&format!("{}/{}/{file_name}", self.download_url, version.tag()))
+    }
+}
+
+/// 這個平台的 Release 壓縮檔名(與 Release workflow 的 target 對應)。
+pub fn release_asset_name(platform: InstallPlatform) -> String {
+    let architecture = std::env::consts::ARCH;
+    match platform {
+        InstallPlatform::MacOs => format!("purrdr-host-service-{architecture}-apple-darwin.tar.gz"),
+        InstallPlatform::Linux => format!("purrdr-host-service-{architecture}-unknown-linux-musl.tar.gz"),
+        InstallPlatform::Windows => "purrdr-host-service-x86_64-pc-windows-msvc.zip".to_owned(),
+    }
+}
+
+/// 更新流程：只對外「檢查」與「套用」。
+pub struct Updater<R: ReleaseSource, L: InstallLocation> {
+    source: R,
+    location: L,
+}
+
+impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
+    pub fn new(source: R, location: L) -> Self {
+        Updater { source, location }
+    }
+
+    /// 已安裝與最新的版本。
+    pub fn check(&mut self) -> Result<UpdateCheck, UpdateError> {
+        let installed = match self.location.installed_version() {
+            Err(UpdateError::NotInstalled) => None,
+            installed => Some(installed?),
+        };
+        Ok(UpdateCheck {
+            installed,
+            latest: self.source.latest_version(),
+        })
+    }
+
+    /// 有更大的版本就下載、核對、替換、重啟;新版起不來就退回。
+    pub fn apply(&mut self) -> Result<UpdateOutcome, UpdateError> {
+        let check = self.check()?;
+        let (installed, latest) = check.versions()?;
+        if !check.update_available() {
+            return Ok(UpdateOutcome::UpToDate { installed, latest });
+        }
+        let asset = release_asset_name(self.location.platform());
+        let checksums = self.source.download(&latest, "SHA256SUMS")?;
+        let archive = self.source.download(&latest, &asset)?;
+        verify_checksum(&checksums, &asset, &archive)?;
+
+        let staging = self.location.staging_directory();
+        let staged = self.stage(&staging, &archive);
+        let replaced = staged
+            .and_then(|()| self.location.verify(&staging))
+            .and_then(|()| self.location.replace(&staging));
+        let _ = std::fs::remove_dir_all(&staging);
+        replaced?;
+
+        if let Err(error) = self.location.restart(&latest) {
+            let reason = match error {
+                UpdateError::Io(message) => message,
+                other => other.to_string(),
+            };
+            return match self.location.restore().and_then(|()| self.location.restart(&installed)) {
+                Ok(()) => Err(UpdateError::RolledBack {
+                    failed: latest,
+                    restored: installed,
+                    reason,
+                }),
+                Err(rollback) => Err(UpdateError::RollbackFailed {
+                    failed: latest,
+                    reason: rollback.to_string(),
+                }),
+            };
+        }
+        Ok(UpdateOutcome::Updated { from: installed, to: latest })
+    }
+
+    /// 清空暫存資料夾後解開壓縮檔。
+    fn stage(&self, staging: &Path, archive: &[u8]) -> Result<(), UpdateError> {
+        match std::fs::remove_dir_all(staging) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(io_error(error)),
+            _ => {}
+        }
+        std::fs::create_dir_all(staging).map_err(io_error)?;
+        if self.location.platform() == InstallPlatform::Windows {
+            zip::ZipArchive::new(std::io::Cursor::new(archive))
+                .and_then(|mut zip| zip.extract(staging))
+                .map_err(|error| io_error(format!("cannot extract the downloaded archive: {error}")))
+        } else {
+            tar::Archive::new(flate2::read::GzDecoder::new(archive))
+                .unpack(staging)
+                .map_err(|error| io_error(format!("cannot extract the downloaded archive: {error}")))
+        }
+    }
+}
+
+/// `SHA256SUMS` 裡 `asset` 那一行要與壓縮檔相符。
+fn verify_checksum(checksums: &[u8], asset: &str, archive: &[u8]) -> Result<(), UpdateError> {
+    let actual: String = Sha256::digest(archive).iter().map(|byte| format!("{byte:02x}")).collect();
+    let expected = String::from_utf8_lossy(checksums).lines().find_map(|line| {
+        let (digest, name) = line.split_once(char::is_whitespace)?;
+        let name = name.trim_start();
+        (name == asset || name.strip_prefix('*') == Some(asset)).then(|| digest.to_ascii_lowercase())
+    });
+    if expected.as_deref() == Some(actual.as_str()) {
+        Ok(())
+    } else {
+        Err(UpdateError::ChecksumMismatch { file: asset.to_owned() })
+    }
+}
