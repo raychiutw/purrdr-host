@@ -52,6 +52,9 @@ pub fn snapshot(root: &Path) -> BTreeMap<String, Option<String>> {
             if path.is_dir() {
                 entries.insert(format!("{relative}/"), None);
                 walk(root, &path, entries);
+            } else if path.file_name().is_some_and(|name| name == "update.lock") {
+                // 鎖檔沒有內容;Windows 上被鎖住時也讀不了。
+                entries.insert(relative, None);
             } else {
                 entries.insert(relative, Some(String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned()));
             }
