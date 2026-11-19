@@ -1,9 +1,13 @@
 //! 一條 app 的 WebSocket 連線：解析協定訊息，轉成 herdr 請求。只處理協定定義的訊息種類。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
@@ -16,13 +20,14 @@ use crate::audit_log::{AuditEvent, AuditLog};
 use crate::device_store::Device;
 use crate::herdr_cli::HerdrCli;
 use crate::herdr_client::{HerdrClient, HerdrFailure, HerdrSubscription};
+use crate::host_files::{self, FileAccessCache, FileAccessEnvironment, FileAccessRules, FileSnapshot, Located, Purpose, RequestPacing};
 use crate::http::{ServiceContext, blocking};
 use crate::pane_terminal::{self, PaneTerminal};
 use crate::protocol::{
     Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, ErrorCode, ErrorMessage, EventsEnded, EventsSubscribe,
-    EventsSubscribeResult, EventsUnsubscribeResult, HerdrServer, PROTOCOL_VERSION, PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult,
-    PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome,
-    Workspace,
+    EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus, HerdrServer, PROTOCOL_VERSION,
+    PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent,
+    TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::transcript::AgentSessionInfo;
 use crate::transcript_session::TranscriptSession;
@@ -75,6 +80,10 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         accepted_subscription: None,
         terminals: HashMap::new(),
         terminal_frames,
+        files: context.files.clone(),
+        file_cache: Arc::new(std::sync::Mutex::new(FileAccessCache::default())),
+        file_pacing: RequestPacing::default(),
+        file_snapshot: None,
     };
     let handler = tokio::spawn(handle_requests(connection, request_queue, context, device_token));
     // 逾時沒收到任何 frame(含 pong)就當作 app 已經不在。
@@ -198,6 +207,12 @@ struct ClientConnection {
     /// 開著的 Pane 終端機，以串流識別碼(開啟請求的 request_id)為 key;drop 時子行程收尾。
     terminals: HashMap<String, PaneTerminal>,
     terminal_frames: mpsc::Sender<ServerMessage>,
+    files: FileAccessEnvironment,
+    /// 主機取檔：對話紀錄裡 Agent 寫出的路徑與版本快取(在 blocking 執行緒用)。
+    file_cache: Arc<std::sync::Mutex<FileAccessCache>>,
+    file_pacing: RequestPacing,
+    /// 主機取檔最近一次從頭讀的快照。
+    file_snapshot: Option<FileSnapshot>,
 }
 
 impl Drop for ClientConnection {
@@ -295,6 +310,8 @@ impl ClientConnection {
                     .await;
                 return None;
             }
+            ClientMessage::FileStat(request) => self.file_stat(request, device).await,
+            ClientMessage::FileRead(request) => self.file_read(request, device).await,
             ClientMessage::PaneTerminalClose(close) => {
                 // drop:關閉 stdin(control 等同 release)並結束子行程。
                 self.terminals.remove(&close.stream_id);
@@ -450,6 +467,117 @@ impl ClientConnection {
             let _ = outbound.send(Outbound::Message(ServerMessage::EventsEnded(ended)));
         });
         self.subscriptions.insert(stream_id, forwarding);
+    }
+
+    /// 主機取檔的規則:herdr snapshot 目前回報的工作目錄、這條連線定位過的對話紀錄與主機服務的環境。
+    async fn file_access_rules(&self) -> Result<FileAccessRules, HerdrFailure> {
+        let result = self.herdr.request("session.snapshot", json!({})).await?;
+        let snapshot = serde_json::from_value::<SnapshotResult>(result).unwrap_or_default().snapshot;
+        Ok(FileAccessRules {
+            working_directories: snapshot.agents.into_iter().filter_map(|agent| agent.cwd).map(PathBuf::from).collect(),
+            home: self.files.home.clone(),
+            temporary_directories: self.files.temporary_directory.iter().cloned().collect(),
+            transcripts: self.transcripts.located_paths(),
+            excluded_directories: vec![self.files.state_directory.clone()],
+        })
+    }
+
+    /// 套用存取規則並開檔(在 blocking 執行緒);超過頻率上限時先等。
+    async fn locate_file(&mut self, path: &str, purpose: Purpose) -> Result<Located, HerdrFailure> {
+        let delay = self.file_pacing.delay_for(std::time::Instant::now());
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        let rules = self.file_access_rules().await?;
+        let cache = self.file_cache.clone();
+        let path = path.to_owned();
+        Ok(blocking(move || {
+            let mut cache = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            host_files::locate(&path, &rules, &mut cache, purpose)
+        })
+        .await)
+    }
+
+    fn audit_file_access(&self, device: &Device, operation: &'static str, path: &str, result: String, size: Option<u64>) {
+        self.audit.record(
+            AuditEvent::FileAccess {
+                device_id: device.device_id.clone(),
+                operation,
+                path: path.to_owned(),
+                result,
+                size,
+            },
+            SystemTime::now(),
+        );
+    }
+
+    async fn file_stat(&mut self, request: FileStat, device: &Device) -> ServerMessage {
+        if !self.handshaken {
+            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
+        }
+        let located = match self.locate_file(&request.path, Purpose::Status).await {
+            Ok(located) => located,
+            Err(failure) => return herdr_error(request.request_id, "session.snapshot", failure),
+        };
+        self.audit_file_access(device, "file.stat", &request.path, status_name(located.status()), located.size());
+        ServerMessage::FileStatResult(FileStatResult {
+            request_id: request.request_id,
+            status: located.status(),
+            version: located.version().map(str::to_owned),
+            size: located.size().map(|size| size as i64),
+        })
+    }
+
+    /// 從頭讀或還沒有這個版本的快照時重新檢查並建快照;之後的分塊從快照讀。
+    async fn file_read(&mut self, request: FileRead, device: &Device) -> ServerMessage {
+        if !self.handshaken {
+            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
+        }
+        let (Ok(offset), Ok(length)) = (u64::try_from(request.offset), u64::try_from(request.length)) else {
+            return error(Some(request.request_id), ErrorCode::InvalidMessage, "offset and length must not be negative");
+        };
+        let reusable = self
+            .file_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| offset > 0 && snapshot.path == request.path && snapshot.version == request.version);
+        if !reusable {
+            let located = match self.locate_file(&request.path, Purpose::Contents).await {
+                Ok(located) => located,
+                Err(failure) => return herdr_error(request.request_id, "session.snapshot", failure),
+            };
+            let (contents, version) = match located {
+                Located::File { contents, version, .. } => (contents.unwrap_or_default(), version),
+                Located::Unavailable { status, size } => {
+                    self.audit_file_access(device, "file.read", &request.path, status_name(status), size);
+                    return ServerMessage::FileReadResult(FileReadResult {
+                        request_id: request.request_id,
+                        status,
+                        size: size.map(|size| size as i64),
+                        offset: None,
+                        bytes: None,
+                    });
+                }
+            };
+            let changed = version != request.version;
+            let result = if changed { "changed".to_owned() } else { status_name(FileStatus::File) };
+            self.audit_file_access(device, "file.read", &request.path, result, Some(contents.len() as u64));
+            self.file_snapshot = Some(FileSnapshot {
+                path: request.path.clone(),
+                version,
+                contents,
+            });
+            if changed {
+                return error(Some(request.request_id), ErrorCode::FileChanged, "file changed since its status was read");
+            }
+        }
+        let snapshot = self.file_snapshot.as_ref().expect("剛建好或可沿用的快照");
+        ServerMessage::FileReadResult(FileReadResult {
+            request_id: request.request_id,
+            status: FileStatus::File,
+            size: None,
+            offset: Some(offset as i64),
+            bytes: Some(BASE64.encode(snapshot.chunk(offset, length))),
+        })
     }
 
     /// 對話紀錄只能依 herdr 目前回報的 agent_session 定位(#59)。
@@ -652,6 +780,14 @@ fn herdr_error(request_id: String, method: &str, failure: HerdrFailure) -> Serve
             ServerMessage::ErrorMessage(herdr_error)
         }
     }
+}
+
+/// `FileStatus` 的協定名稱(稽核紀錄用)。
+fn status_name(status: FileStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 fn error_message(request_id: Option<String>, code: ErrorCode, message: &str) -> ErrorMessage {

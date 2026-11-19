@@ -6,6 +6,8 @@
 //! - 字串列舉:`type: string` + `enum`。
 //! - 訊息聯集:`oneOf` 只列 `$ref`,每個都是帶 `type` const 的物件。
 //!   有變體標 `x-write: true` 時，聯集多產生 `is_write()`(Swift `isWrite`)。
+//! - 頂層 `x-excluded-file-locations`、`x-temporary-file-locations`(字串陣列)與 `x-maximum-file-size`、`x-maximum-file-chunk`(整數):
+//!   主機取檔的共用常數，兩端都產生(raychiutw/purrdr.ios#227)。
 
 use serde_json::Value;
 
@@ -57,6 +59,10 @@ enum Definition {
 /// schema 解析後的模型。
 pub struct Protocol {
     version: i64,
+    excluded_file_locations: Vec<String>,
+    temporary_file_locations: Vec<String>,
+    maximum_file_size: u64,
+    maximum_file_chunk: u64,
     definitions: Vec<Definition>,
 }
 
@@ -64,12 +70,23 @@ impl Protocol {
     /// 解析 schema;用到子集合以外的寫法時回傳錯誤。
     pub fn parse(schema: &Value) -> Result<Self, String> {
         let version = schema["x-protocol-version"].as_i64().ok_or("缺少 x-protocol-version")?;
+        let excluded_file_locations = string_list(schema, "x-excluded-file-locations")?;
+        let temporary_file_locations = string_list(schema, "x-temporary-file-locations")?;
+        let maximum_file_size = schema["x-maximum-file-size"].as_u64().ok_or("缺少 x-maximum-file-size")?;
+        let maximum_file_chunk = schema["x-maximum-file-chunk"].as_u64().ok_or("缺少 x-maximum-file-chunk")?;
         let definitions_json = schema["$defs"].as_object().ok_or("缺少 $defs")?;
         let mut definitions = Vec::new();
         for (name, definition) in definitions_json {
             definitions.push(parse_definition(name, definition, schema)?);
         }
-        Ok(Protocol { version, definitions })
+        Ok(Protocol {
+            version,
+            excluded_file_locations,
+            temporary_file_locations,
+            maximum_file_size,
+            maximum_file_chunk,
+            definitions,
+        })
     }
 
     /// 產生 Rust(serde)型別。
@@ -78,6 +95,18 @@ impl Protocol {
         output += &format!(
             "/// 協定版本(schema 的 `x-protocol-version`)。\npub const PROTOCOL_VERSION: i64 = {};\n",
             self.version
+        );
+        output += &format!(
+            "\n/// 主機取檔的排除清單(schema 的 `x-excluded-file-locations`)。\npub const EXCLUDED_FILE_LOCATIONS: &[&str] = &[{}];\n",
+            quoted(&self.excluded_file_locations)
+        );
+        output += &format!(
+            "\n/// 主機取檔在工作目錄以外可放行的系統暫存目錄(schema 的 `x-temporary-file-locations`)。\npub const TEMPORARY_FILE_LOCATIONS: &[&str] = &[{}];\n",
+            quoted(&self.temporary_file_locations)
+        );
+        output += &format!(
+            "\n/// 主機取檔的大小上限(schema 的 `x-maximum-file-size`)。\npub const MAXIMUM_FILE_SIZE: u64 = {};\n\n/// 主機取檔一次讀取最多回傳的 bytes(schema 的 `x-maximum-file-chunk`)。\npub const MAXIMUM_FILE_CHUNK: u64 = {};\n",
+            self.maximum_file_size, self.maximum_file_chunk
         );
         for definition in &self.definitions {
             output += "\n";
@@ -91,8 +120,17 @@ impl Protocol {
         let mut output = format!("// {HEADER}\n\nimport Foundation\n\n");
         output += "/// 主機服務協定(ADR-0010)的訊息型別。\npublic enum HostServiceProtocol {\n";
         output += &format!(
-            "    /// 協定版本(schema 的 `x-protocol-version`)。\n    public static let version = {}\n}}\n",
-            self.version
+            "    /// 協定版本(schema 的 `x-protocol-version`)。\n    public static let version = {}\n    /// 主機取檔的排除清單(schema 的 `x-excluded-file-locations`)。\n    public static let excludedFileLocations = [{}]\n",
+            self.version,
+            quoted(&self.excluded_file_locations)
+        );
+        output += &format!(
+            "    /// 主機取檔在工作目錄以外可放行的系統暫存目錄(schema 的 `x-temporary-file-locations`)。\n    public static let temporaryFileLocations = [{}]\n",
+            quoted(&self.temporary_file_locations)
+        );
+        output += &format!(
+            "    /// 主機取檔的大小上限(schema 的 `x-maximum-file-size`)。\n    public static let maximumFileSize = {}\n    /// 主機取檔一次讀取最多回傳的 bytes(schema 的 `x-maximum-file-chunk`)。\n    public static let maximumFileChunk = {}\n}}\n",
+            self.maximum_file_size, self.maximum_file_chunk
         );
         for definition in &self.definitions {
             output += "\n";
@@ -100,6 +138,24 @@ impl Protocol {
         }
         output
     }
+}
+
+/// 字串陣列的字面值(Rust 與 Swift 寫法相同)。
+fn quoted(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| serde_json::to_string(value).expect("字串可序列化"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn string_list(schema: &Value, key: &str) -> Result<Vec<String>, String> {
+    schema[key]
+        .as_array()
+        .ok_or_else(|| format!("缺少 {key}"))?
+        .iter()
+        .map(|value| value.as_str().map(str::to_owned).ok_or_else(|| format!("{key} 只能是字串")))
+        .collect()
 }
 
 fn description_of(value: &Value) -> Option<String> {

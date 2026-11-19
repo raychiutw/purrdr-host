@@ -10,6 +10,8 @@ pub mod device_store;
 pub mod herdr_cli;
 pub mod herdr_client;
 pub mod herdr_socket;
+pub mod host_files;
+pub mod host_path_mentions;
 mod http;
 pub mod install;
 pub mod management;
@@ -43,6 +45,8 @@ pub struct HostServiceConfig {
     pub heartbeat: Heartbeat,
     /// 對話紀錄所在的家目錄與設定目錄。
     pub transcripts: transcript::TranscriptEnvironment,
+    /// 主機的暫存目錄(`TMPDIR`／`TEMP`);主機取檔放行 Agent 提到的暫存檔。
+    pub temporary_directory: Option<PathBuf>,
 }
 
 /// 預設埠(127.0.0.1 上)。
@@ -96,6 +100,7 @@ impl HostServiceConfig {
             state_directory,
             heartbeat: Heartbeat::default(),
             transcripts: transcript::TranscriptEnvironment::resolve(platform, environment),
+            temporary_directory: Some(std::env::temp_dir()),
         })
     }
 }
@@ -134,6 +139,11 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         devices: DeviceStore::new(&config.state_directory),
         audit: AuditLog::new(&config.state_directory),
         heartbeat: config.heartbeat,
+        files: host_files::FileAccessEnvironment {
+            home: config.transcripts.home.clone(),
+            temporary_directory: config.temporary_directory,
+            state_directory: config.state_directory.clone(),
+        },
         transcripts: config.transcripts,
     });
     let accept_loop = tokio::spawn(async move {
