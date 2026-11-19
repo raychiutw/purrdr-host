@@ -12,7 +12,7 @@ use serde_json::Value;
 /// 產生的檔案路徑(相對 repo 根目錄)。
 pub const SCHEMA_PATH: &str = "protocol/host-service.schema.json";
 pub const RUST_OUTPUT_PATH: &str = "host-service/service/src/protocol.rs";
-pub const SWIFT_OUTPUT_PATH: &str = "src/PurrdrCore/HostServiceProtocol.swift";
+pub const SWIFT_OUTPUT_PATH: &str = "generated/swift/HostServiceProtocol.swift";
 
 const HEADER: &str = "由 protocol/host-service.schema.json 產生，不要手動修改。重新產生:cd host-service && cargo run -p protocol-codegen";
 

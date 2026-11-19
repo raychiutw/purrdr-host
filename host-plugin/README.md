@@ -16,4 +16,4 @@ Purrdr 的主機外掛：裝在主機的 [herdr](https://herdr.dev) 上，Agent 
 | `notify.sh` | macOS／Linux 的事件 hook |
 | `notify.ps1` | Windows 的事件 hook(best-effort) |
 
-開發與測試在 Purrdr 的 app repo(`host-plugin/`,測試是 `tests/PurrdrCoreTests/HostPluginScriptTests.swift`);這個公開 repo 是它的發佈版本。
+開發與測試在 [`raychiutw/purrdr-host`](https://github.com/raychiutw/purrdr-host)(`host-plugin/`,測試是 `host-service/plugin-tests/tests/notify_script.rs`);`raychiutw/purrdr-host-plugin` 是它的發佈版本。

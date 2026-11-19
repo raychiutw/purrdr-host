@@ -1,0 +1,11 @@
+# Rust(workspace 在 host-service/)
+target/
+
+# macOS
+.DS_Store
+
+# TDD 紅綠燈的本機紀錄(摘要寫在 PR)
+.tdd-logs/
+
+# Agent worktree
+.claude/worktrees/

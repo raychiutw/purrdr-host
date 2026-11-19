@@ -1,8 +1,9 @@
 # 主機服務(ADR-0010):HTTPS 連線方式在主機上執行的常駐程式。
 # - service:主機服務本體(只聽 127.0.0.1,直接連 herdr 本機 socket)
 # - codegen:由 protocol/host-service.schema.json 產生 Rust 與 Swift 協定型別
+# - plugin-tests:主機外掛(host-plugin/)腳本的測試
 [workspace]
-members = ["service", "codegen"]
+members = ["service", "codegen", "plugin-tests"]
 resolver = "3"
 
 [workspace.package]

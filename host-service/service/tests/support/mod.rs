@@ -26,11 +26,9 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 static NEXT_SOCKET: AtomicU32 = AtomicU32::new(0);
 
-/// 從真實主機錄下的 herdr 回應(`tests/PurrdrTestSupport/Fixtures/herdr-0.9.5/`)。
+/// 從真實主機錄下的 herdr 回應(repo 根目錄的 `fixtures/herdr-0.9.5/`)。
 pub fn recorded(name: &str) -> Value {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/PurrdrTestSupport/Fixtures/herdr-0.9.5")
-        .join(name);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/herdr-0.9.5").join(name);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     serde_json::from_str(text.lines().next().unwrap()).unwrap()
 }

@@ -1,7 +1,7 @@
 #!/bin/sh
-# Purrdr 主機服務的一行安裝(macOS、Linux,#198):
+# Purrdr 主機服務的一行安裝(macOS、Linux,raychiutw/purrdr.ios#198):
 #
-#   curl -fsSL https://github.com/raychiutw/purrdr.ios/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/raychiutw/purrdr-host/releases/latest/download/install.sh | sh
 #   curl -fsSL …/install.sh | sh -s -- --yes --port 47820     # 參數原樣交給 `purrdr-host-service install`
 #
 # 下載這台主機的 Release 壓縮檔，以 SHA256SUMS 驗證(不符就中止、不留檔),解壓到暫存資料夾後執行
@@ -13,7 +13,7 @@
 #   PURRDR_HOST_SERVICE_DOWNLOAD_URL  下載來源(網址或本機資料夾;測試用)
 set -eu
 
-repository="https://github.com/raychiutw/purrdr.ios"
+repository="https://github.com/raychiutw/purrdr-host"
 
 fail() {
     echo "purrdr-host-service install: $*" >&2

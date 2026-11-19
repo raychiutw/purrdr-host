@@ -1,6 +1,6 @@
-# Purrdr 主機服務的一行安裝(Windows,#198):
+# Purrdr 主機服務的一行安裝(Windows,raychiutw/purrdr.ios#198):
 #
-#   irm https://github.com/raychiutw/purrdr.ios/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/raychiutw/purrdr-host/releases/latest/download/install.ps1 | iex
 #   & ([scriptblock]::Create((irm …/install.ps1))) --yes --port 47820   # 參數原樣交給 `purrdr-host-service install`
 #
 # 下載 Release 壓縮檔，以 SHA256SUMS 驗證(不符就中止、不留檔),解壓到暫存資料夾後執行
@@ -18,7 +18,7 @@
     $ProgressPreference = 'SilentlyContinue'
     $installArguments = @($args)
 
-    $repository = 'https://github.com/raychiutw/purrdr.ios'
+    $repository = 'https://github.com/raychiutw/purrdr-host'
     # 目前只發 x86_64;ARM64 的 Windows 以模擬執行。
     $asset = 'purrdr-host-service-x86_64-pc-windows-msvc.zip'
 

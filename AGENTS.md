@@ -1,0 +1,91 @@
+# AGENTS.md
+
+## 專案性質
+
+Purrdr 的主機端元件：裝在電腦(主機)上、給 Purrdr app(iPhone／iPad)連的部分。從 app repo [`raychiutw/purrdr.ios`](https://github.com/raychiutw/purrdr.ios) 抽出(保留歷史),公開發行。
+
+- **主機服務**(`host-service/`):HTTPS 連線方式在主機上執行的常駐程式(Rust)。只綁 127.0.0.1,對外由 `tailscale serve` 提供 HTTPS。
+- **主機外掛**(`host-plugin/`):herdr plugin,Agent 進入「需要你」時通知 Purrdr 後台推播。
+- **協定**(`protocol/`):app 與主機服務之間的協定，`host-service.schema.json` 是唯一定義。
+
+這個 repo 沒有自己的 ADR、行為規格與詞彙表，一律引用 app repo:
+- 詞彙 [`GLOSSARY.md`](https://github.com/raychiutw/purrdr.ios/blob/master/GLOSSARY.md)
+- 決策 [`docs/adr/`](https://github.com/raychiutw/purrdr.ios/tree/master/docs/adr)(主機服務是 [ADR-0010](https://github.com/raychiutw/purrdr.ios/blob/master/docs/adr/0010-https-via-host-service-and-tailscale-serve.md),推播是 [ADR-0004](https://github.com/raychiutw/purrdr.ios/blob/master/docs/adr/0004-push-via-host-plugin-and-relay.md),Pane 終端機是 [ADR-0005](https://github.com/raychiutw/purrdr.ios/blob/master/docs/adr/0005-pane-terminal-via-session-control.md),會寫入主機的功能是 [ADR-0002](https://github.com/raychiutw/purrdr.ios/blob/master/docs/adr/0002-zero-install-host-over-ssh.md))
+- **clean-room**([ADR-0001](https://github.com/raychiutw/purrdr.ios/blob/master/docs/adr/0001-clean-room-from-herdrchat.md)):不閱讀、不複製 herdrchat 原始碼;只依據 app repo 的 `docs/research/herdrchat-behavior-spec.md`、herdr 官方文件與真實主機實測。
+- issue 與 spec 都在 app repo 的 GitHub Issues。本 repo 的文件、註解與 commit message 提到 issue 一律寫成 `raychiutw/purrdr.ios#<數字>`(抽出前的舊 commit 寫的 `#<數字>` 也是指 app repo)。
+
+## 目錄
+
+```text
+host-service/                  # Rust workspace(根目錄的 cargo 指令都在這裡跑)
+  service/                     # 主機服務本體(crate purrdr-host-service)
+  codegen/                     # 協定型別產生器(crate protocol-codegen)
+  plugin-tests/                # 主機外掛 notify.sh 的測試(crate host-plugin-tests,只有 tests/)
+  install/                     # 一行安裝腳本 install.sh／install.ps1(隨 Release 發佈)
+host-plugin/                   # herdr plugin:herdr-plugin.toml、notify.sh、notify.ps1
+protocol/                      # host-service.schema.json(唯一定義)與 examples/(兩端共用的範例)
+generated/swift/               # codegen 產生的 Swift 協定型別(app repo 同步用，不要手改)
+fixtures/herdr-0.9.5/          # 從真實主機錄的 herdr 回應(測試回放用)
+scripts/host-service-version.sh  # 印出某個 commit 的主機服務版本號(Release 比對用)
+.github/workflows/             # ci.yml(PR)、host-service-release.yml(發行)
+```
+
+## 常用指令
+
+```bash
+cd host-service && cargo test --workspace --locked       # 全部測試(主機服務、codegen 同步、主機外掛腳本)
+cd host-service && cargo fmt --all --check
+cd host-service && cargo clippy --workspace --all-targets --locked -- -D warnings
+cd host-service && cargo run -p protocol-codegen          # 改了 protocol/host-service.schema.json 後重新產生 Rust 與 Swift 型別
+cd host-service && cargo run -p protocol-codegen -- --check  # 只檢查產生的檔案是否最新
+cd host-service && cargo clean                            # 磁碟有限時，跑完清掉 target/
+actionlint                                                # 改了 workflow 後檢查
+```
+
+零 warning:CI 以 `RUSTFLAGS=-D warnings` 建置，Linux 另跑 fmt 與 clippy `-D warnings`。
+
+CI(`.github/workflows/ci.yml`,`pull_request` 與 `workflow_call`):macOS(`macos-26`)、Linux(`ubuntu-24.04`)、Windows(`windows-2025`)三平台 `cargo test --workspace --locked`;Linux 另跑 `cargo fmt --all --check` 與 clippy。actions 一律 pin 到 commit SHA。
+
+## 協定與 codegen(app repo 的來源)
+
+- 協定只改 `protocol/host-service.schema.json`,再 `cargo run -p protocol-codegen` 產生 `host-service/service/src/protocol.rs` 與 `generated/swift/HostServiceProtocol.swift`(`HostServiceProtocol` 命名空間)。同步與否由 `codegen/tests/generated_files.rs` 把關。
+- schema 標 `x-write: true` 的訊息由 codegen 產生 `is_write()`／`isWrite`,主機服務統一以此拒絕唯讀裝置並寫稽核紀錄，新增寫入訊息只要標 `x-write`。
+- **app repo 以同步腳本從這裡拉取** `protocol/`(schema 與 `examples/`)和 `generated/swift/HostServiceProtocol.swift`(放到它的 `src/PurrdrCore/HostServiceProtocol.swift`)。`protocol/examples/` 由 Rust(`service/tests/protocol_examples.rs`)與 Swift(app repo 的 `HostServiceProtocolExampleTests`)兩端各自編解碼。**改了協定，合併後要在 app repo 同步並讓它的測試通過**;app 端要支援新的 herdr 操作時，先在這裡的 schema 加訊息。
+
+## 主機服務(`host-service/service/`,ADR-0010、raychiutw/purrdr.ios#55)
+
+- Rust,只綁 127.0.0.1(預設埠 47820,`--port` 可改;不做 TLS,對外由 `tailscale serve` 提供 HTTPS)。
+- WebSocket 路徑 `/v1/ws`(`connection.rs`:讀取、依序處理請求、送出分成三段，處理請求時仍回 pong;每 15 秒送 ping,45 秒沒收到 app 任何 frame 就斷線，`Heartbeat`)。每個 herdr 請求開一條連線直接連 herdr 本機 socket(Unix socket／`\\.\pipe\<socket 路徑>`,解析順序 `--session` → `HERDR_SOCKET_PATH` → `HERDR_SESSION` → 預設)。
+- 事件訂閱(raychiutw/purrdr.ios#58)是保持開著的連線(`HerdrClient::subscribe`),以 `events.event` 轉送、herdr 結束時送 `events.ended`,`events.unsubscribe` 或 app 斷線即關掉，不輪詢 snapshot。
+- 服務本身不執行任意子行程(`no_command_execution` 測試擋，例外只有安裝指令用的 `install/system.rs` 與 Pane 終端機的 `pane_terminal.rs`)。
+- **Pane 終端機**(raychiutw/purrdr.ios#61,ADR-0005):`pane.terminal.open` 以子行程執行 `herdr [--session <名稱>] terminal session control <target> --cols --rows [--takeover]`(唯讀裝置用 `observe`,忽略 takeover),stdout 的 frame 原樣轉成 `pane.terminal.frame`(經送出段的有界佇列，送不出去時 herdr 那端等),`terminal.closed` 轉成 `pane.terminal.closed`(`ending`:closed／disconnected(沒有 closed 就 EOF、exit 0)／failed(exit 非 0,帶 stderr));input／resize／scroll 標 `x-write`、不回應(scroll 的 `source` 沒帶時是 wheel,page_key 原樣轉給 herdr),稽核只在 control 接上時記一筆。target 只收 pane／terminal id 的字元、不能以 `-` 開頭，格數上限 500×200,單則輸入 64 KiB。`pane.terminal.close` 或 WSS 結束(含心跳逾時):control 關 stdin(等同 release)等 2 秒，observe 直接結束子行程(Windows 的 observer 關 stdin 不會結束)並補送 closed;子行程也設了 `kill_on_drop`,Windows 以 `CREATE_NO_WINDOW` 執行。herdr 執行檔每次執行時才找(`HerdrCli`:PATH、Homebrew、`~/.local/bin`、`~/bin`、`%LOCALAPPDATA%\Programs\Herdr\bin\herdr.exe`)。
+- **對話紀錄**(raychiutw/purrdr.ios#59,`transcript.rs` 讀檔規則、`transcript_session.rs` 一條連線的狀態):`transcript.locate` 只接受 herdr snapshot 目前回報的 agent_session(格式與 cwd 取自 snapshot;id 須是安全字元，path 只限 agy／Pi／OMP 且是絕對、`.jsonl`、無 `..`),視窗與追蹤只接受這條連線定位過的路徑(`transcript_not_allowed`),所以主機服務不提供任意檔案讀取。位置：Claude(`CLAUDE_CONFIG_DIR`,含 worktree 後備)、Codex(`CODEX_HOME`;多個 rollout 回有歧義)、Antigravity、回報的路徑;Grok 與 Pi 以 id 定位回 `transcript_unsupported`。家目錄是 Unix `HOME`／Windows `USERPROFILE`(`TranscriptEnvironment`,測試用暫存家目錄)。追蹤每 250ms 檢查檔案大小，有新的完整行推 `transcript.update`(raychiutw/purrdr.ios#173:每則最多 limit bytes 的完整行，落後超過 limit 時從游標分段接著送，第一行就超過 limit 時只送那一行、剝除圖片後截短到 limit bytes、length 照原始長度，游標照樣前進——規則同 app 的 SSH `catchUp` 腳本;不再以 `too_far_behind` 結束，該值留在 schema 給舊版主機服務),檔案變小(`shrank`)、游標前 64 byte 的內容變了(`replaced`,被換成同長或更長的新檔)、檔案不見或讀不到時推結束原因後停止;`transcript.unfollow` 或連線結束即停止。推送經 `connection.rs` 的送出段與回應、事件共用同一個 WebSocket。行的格式(原始長度 + 剝除圖片)與 app 的 SSH 腳本相同。
+- **連線配對與裝置權杖**(raychiutw/purrdr.ios#56):HTTP 入口用 axum。`POST /v1/pair`(本文 `PairRequest`)以配對碼換權杖,`POST /v1/revoke` 撤銷自己;WSS 與撤銷都帶 `Authorization: Bearer <權杖>`,無效／撤銷時送 `error` 後以 close code 4401 關閉，且每個訊息都重新驗證。檔案在 `~/.purrdr/host-service/`(`--state-dir` 可改):`devices.json`(只存 SHA-256,跨行程以 `devices.lock` 檔案鎖)、`audit.log`(JSON Lines,不記按鍵、prompt、權杖、配對碼)、`config.json` 的 `https_address`(安裝流程寫入,`pair` 的預設位址)。管理指令 `pair [--read-only] [--address]`、`devices`、`revoke <裝置 ID>`。`welcome` 帶 `read_only`,app 以此停用輸入。
+- **安裝**(raychiutw/purrdr.ios#62,`install [--port] [--session] [--yes]`／`uninstall`／`status`,`src/install/`):檢查 Tailscale、MagicDNS、HTTPS Certificates(失敗指向 `login.tailscale.com/admin/dns`),說明 Certificate Transparency 並徵求同意，不覆蓋別人的 serve 443;檔案在 `~/.purrdr/host-service/`(`bin/`、`config.json` 的 `https_address`、安裝紀錄 `install.json`;`~/.purrdr/` 與 app 的其他功能共用，只在安裝時新建且空了才刪)。自動啟動:macOS LaunchAgent `com.raychiu.purrdr.host-service`、Linux systemd user unit `purrdr-host-service.service`、Windows `HKCU\…\Run` 的 `PurrdrHostService` 指向不開視窗的 `purrdr-host-service-background.exe`(`windows_subsystem`)。再次 install 就地更新、保留已配對裝置;失敗時依紀錄還原。
+- **一行安裝腳本**(`install/install.sh`／`install.ps1`,raychiutw/purrdr.ios#198):從本 repo 的 Release(`https://github.com/raychiutw/purrdr-host/releases/latest/download/`)下載這台主機的壓縮檔，以 `SHA256SUMS` 驗證後執行 `purrdr-host-service install`。環境變數 `PURRDR_HOST_SERVICE_VERSION`(指定版本)、`PURRDR_HOST_SERVICE_DOWNLOAD_URL`(測試用來源)。安裝說明網頁在 app repo 的 `docs/site/purrdr/host-service/`(https://raychiutw.github.io/purrdr/host-service/)。
+
+## 主機外掛(`host-plugin/`,ADR-0004、raychiutw/purrdr.ios#29)
+
+- herdr plugin manifest(`herdr-plugin.toml`,id `purrdr.push`)+ `notify.sh`(macOS／Linux,sh + curl)／`notify.ps1`(Windows,best-effort;herdr 的 plugin 在 Windows 仍是 preview)。herdr 在 `pane.agent_status_changed` 時以新程序執行，沒有常駐程序、不寫狀態。
+- 發佈成公開 repo `raychiutw/purrdr-host-plugin` 後，由 app 經 SSH `herdr plugin install raychiutw/purrdr-host-plugin --yes` 安裝(app 的來源常數 `PushSettings.pluginSource`)。
+- 每支裝置的配對檔 `~/.purrdr/push-<裝置 id>/pairing`(app 經 `ReversibleHostWrite` 寫入，格式見 app 的 `PushPairingFile`:`purrdr-push 1`、`endpoint=`、`key=`、`muted=<session>`)。Agent 進入 blocked 時對每支裝置 POST 後台 `/v1/push`,只帶 workspace 名稱、狀態與 pane id,**不帶終端機標題或任何對話內容**;配對密鑰經 stdin 交給 curl,不出現在參數。某支裝置靜音了這個聊天(Agent 的 session 值)就跳過它，有靜音時才問 herdr 一次(`herdr pane get`)。
+- 測試 `host-service/plugin-tests/tests/notify_script.rs`(移植自 app repo 的 `HostPluginScriptTests`):在暫存家目錄以真的 `sh` 執行 `notify.sh`,`curl`／`herdr` 換成家目錄 `bin/` 的假程式，記錄參數與 stdin,不連網路。執行腳本的測試只在 Unix 跑(`#[cfg(unix)]`);`notify.ps1` 沒有自動測試。manifest 的檢查三平台都跑。
+
+## 主機服務 Release(`.github/workflows/host-service-release.yml`,raychiutw/purrdr.ios#198)
+
+- 合併進 `master` 且 `host-service/service/Cargo.toml` 的 version 有變才發行(`scripts/host-service-version.sh` 比對合併前後),也可手動觸發(`gh workflow run host-service-release.yml --ref master`);同一個版本的 Release 已存在時失敗(不覆蓋)。發版 = 開一個只遞增 version 的 PR 並合併。PR 的 CI 已跑過三平台測試，這裡不重測。
+- 建置 macOS arm64／x86_64、Linux musl x86_64／aarch64、Windows x86_64,發到本 repo 的 Release `host-service-v<版本>`(壓縮檔、`SHA256SUMS`、一行安裝腳本，標為 latest)。
+- macOS 一律以 Developer ID 簽章(hardened runtime);**公證是可選的**:GitHub environment `release`(部署分支限定 `master`)有變數 `APPLE_TEAM_ID`、secret `DEVELOPER_ID_P12`(base64 的 .p12)、`DEVELOPER_ID_P12_PASSWORD`;`ASC_KEY_ID`／`ASC_ISSUER_ID`／`ASC_PRIVATE_KEY` 三個都有才公證，缺任何一個就印 warning、只簽章。Windows 執行檔不簽章(安裝說明交代 SmartScreen)。
+- **發行新的主機服務時，app repo 的 `HostServiceUpdates.latestKnownVersion` 要一起遞增**(app 以它與 `welcome` 的 `host_service_version` 比較，舊了就提示更新)。
+
+## 測試慣例
+
+- 測試以真正的 WebSocket client 連主機服務，背後是回放 `fixtures/herdr-0.9.5/` 錄製 NDJSON 的假 herdr socket(`service/tests/support/`)。錄製檔一律從真實主機錄(app repo 的 `scripts/record-herdr-fixture.sh`),個人資料換成假值，不照程式碼手寫。
+- `tests/pane_terminal.rs` 與 `tests/install_script.rs` 是 `harness = false`:測試執行檔本身帶特定參數或環境變數時，當假的 herdr CLI(回放 `session-control/` 錄製檔)或壓縮檔裡假的主機服務。
+- 安裝流程以假系統(`tests/install_support/`)加暫存家目錄，三平台流程在每個 CI 平台都跑，斷言「解除安裝後家目錄快照與系統狀態都與安裝前相同」;**絕不在真機安裝、絕不對真正的家目錄測試**。
+- TDD:production code 變更先寫失敗測試，並真的跑出紅燈、留下輸出;移植或新增的守門測試以 mutation(把實作改壞看它轉紅)確認有效。紀錄放 repo 外，摘要寫在 PR。
+
+## 開發流程
+
+- 不直接 commit 到 `master`:開 feature branch,push 後開 PR,CI 三平台全綠後以 **merge commit** 合併(不 squash)。
+- 文件、註解、commit message 用繁體中文(台灣用語),技術名詞保留英文。

@@ -192,6 +192,20 @@ fn missing_checksum_entry_aborts() {
     assert!(run.temporary_is_empty(), "暫存資料夾沒清掉");
 }
 
+/// 兩支腳本都從本 repo(raychiutw/purrdr-host)的 Release 下載，用法註解也指向同一處。
+fn scripts_download_from_this_repository() {
+    const REPOSITORY: &str = "https://github.com/raychiutw/purrdr-host";
+    for name in ["install.sh", "install.ps1"] {
+        let script = std::fs::read_to_string(scripts_directory().join(name)).unwrap();
+        assert!(
+            script.contains(&format!("repository=\"{REPOSITORY}\"")) || script.contains(&format!("$repository = '{REPOSITORY}'")),
+            "{name}"
+        );
+        assert!(script.contains(&format!("{REPOSITORY}/releases/latest/download/{name}")), "{name} 的用法註解");
+        assert!(!script.contains("github.com/raychiutw/purrdr.ios"), "{name} 還從 app repo 下載");
+    }
+}
+
 /// 假的主機服務：參數一行，接著是執行檔所在資料夾的檔名(排序)。
 fn fake_host_service(record: &str) -> std::process::ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -218,6 +232,7 @@ fn main() -> std::process::ExitCode {
             checksum_mismatch_aborts_without_running_or_leaving_files,
         ),
         ("missing_checksum_entry_aborts", missing_checksum_entry_aborts),
+        ("scripts_download_from_this_repository", scripts_download_from_this_repository),
     ];
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let filters: Vec<&String> = arguments.iter().filter(|argument| !argument.starts_with('-')).collect();
