@@ -6,7 +6,7 @@ use install_support::{FQDN, FakeSystem, LAUNCH_AGENT_LABEL, RUN_VALUE, SYSTEMD_U
 use std::time::SystemTime;
 
 use purrdr_host_service::herdr_socket::{Platform, SocketEnvironment};
-use purrdr_host_service::install::{InstallError, InstallPlatform, InstallQuestion, Installer};
+use purrdr_host_service::install::{InstallError, InstallOptions, InstallPlatform, InstallQuestion, Installer};
 use purrdr_host_service::management;
 use purrdr_host_service::state_directory::default_state_directory;
 
@@ -506,4 +506,48 @@ fn pairing_link_keeps_the_https_port() {
         output.contains("purrdr://pair?address=https%3A%2F%2Fstudio.tail1234.ts.net%3A8443&code="),
         "{output}"
     );
+}
+
+fn record(host: &TestHost) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(host.service_directory().join("install.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn auto_update_is_on_by_default_off_with_the_option_and_kept_when_installing_again() {
+    let host = TestHost::new(InstallPlatform::Linux);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+
+    installer.install(&host.options(PORT), |_| true).unwrap();
+    let default = record(&host)["auto_update"].clone();
+    let without_auto_update = InstallOptions {
+        auto_update: Some(false),
+        ..host.options(PORT)
+    };
+    installer.install(&without_auto_update, |_| true).unwrap();
+    let with_option = record(&host)["auto_update"].clone();
+    installer.install(&host.options(PORT), |_| true).unwrap();
+
+    assert_eq!(default, true);
+    assert_eq!(with_option, false);
+    assert_eq!(record(&host)["auto_update"], false, "再次安裝沿用上次的選擇");
+}
+
+#[test]
+fn auto_update_can_be_switched_and_records_without_it_mean_on() {
+    let host = TestHost::new(InstallPlatform::Linux);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+    assert_eq!(installer.set_auto_update(false), Err(InstallError::NotInstalled));
+    installer.install(&host.options(PORT), |_| true).unwrap();
+
+    installer.set_auto_update(false).unwrap();
+    let off = record(&host)["auto_update"].clone();
+    installer.set_auto_update(true).unwrap();
+    let on = record(&host)["auto_update"].clone();
+    let mut from_0_5_0 = record(&host);
+    from_0_5_0.as_object_mut().unwrap().remove("auto_update");
+    std::fs::write(host.service_directory().join("install.json"), from_0_5_0.to_string()).unwrap();
+    installer.install(&host.options(PORT), |_| true).unwrap();
+
+    assert_eq!((off, on), (serde_json::json!(false), serde_json::json!(true)));
+    assert_eq!(record(&host)["auto_update"], true);
 }

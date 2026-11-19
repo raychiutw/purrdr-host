@@ -2,6 +2,7 @@
 //! `purrdr-host-service pair | devices | revoke …`:管理連線配對與裝置(見 `management`)。
 //! `purrdr-host-service --version`:印出版本(一行安裝腳本與 app 的更新提示用，#198)。
 //! `purrdr-host-service install [--port <埠>] [--session <herdr session>] [--yes]`、`uninstall`、`status`:安裝(見 `install`)。
+//! `purrdr-host-service update [--check] [--yes]`、`version`:更新到最新 Release、顯示版本(見 `update`)。
 
 use std::process::ExitCode;
 use std::time::SystemTime;

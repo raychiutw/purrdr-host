@@ -47,6 +47,8 @@ async fn status_after_install_reports_autostart_and_serve_on_every_platform() {
 
         assert!(status.installed, "{platform:?}");
         assert!(status.autostart_registered, "{platform:?}");
+        assert_eq!(status.auto_update, Some(true), "{platform:?}");
+        assert!(status.to_string().contains("  auto update: on\n"), "{status}");
         assert!(!status.listening, "{platform:?}");
         assert_eq!(status.https_address.as_deref(), Some(format!("https://{FQDN}").as_str()));
         assert_eq!(status.serve, ServeStatus::Configured(format!("http://127.0.0.1:{port}")), "{platform:?}");

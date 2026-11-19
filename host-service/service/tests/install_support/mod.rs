@@ -2,7 +2,10 @@
 
 #![allow(dead_code)]
 
+pub mod release;
+
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -49,6 +52,9 @@ pub fn snapshot(root: &Path) -> BTreeMap<String, Option<String>> {
             if path.is_dir() {
                 entries.insert(format!("{relative}/"), None);
                 walk(root, &path, entries);
+            } else if path.file_name().is_some_and(|name| name == "update.lock") {
+                // 鎖檔沒有內容;Windows 上被鎖住時也讀不了。
+                entries.insert(relative, None);
             } else {
                 entries.insert(relative, Some(String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned()));
             }
@@ -94,6 +100,7 @@ impl TestHost {
             port,
             herdr_session: None,
             https_port: None,
+            auto_update: None,
             source_directory: self.downloads.0.clone(),
         }
     }
@@ -161,6 +168,19 @@ pub struct FakeSystem {
     pub commands: Vec<String>,
     /// 等行程結束後才刪的資料夾(fake 會立刻刪)。
     pub deferred_removals: Vec<PathBuf>,
+    /// 假主機服務啟動時在 127.0.0.1 聽的埠;None 表示不聽(安裝測試的執行檔不是假主機服務)。
+    pub service_port: Option<u16>,
+    /// 執行中的假主機服務。
+    pub service_listener: Option<TcpListener>,
+}
+
+/// 正式版的 Apple Team ID(更新只接受這個 Team 的 Developer ID 簽章)。
+pub const TEAM_ID: &str = "8Z6WVFJ574";
+
+/// 假主機服務執行檔的內容：`--version` 回報 `version`;`traits` 含 `broken`(啟動失敗)、`unsigned`(macOS 簽章不符)、
+/// `stale`(會聽埠，但執行中的服務回報的不是這個版本，例如重啟沒有真的換掉舊程序)。
+pub fn fake_host_service(version: &str, traits: &str) -> String {
+    format!("fake-host-service {version} {traits}")
 }
 
 impl FakeSystem {
@@ -177,6 +197,71 @@ impl FakeSystem {
             autostart_fails: false,
             commands: Vec::new(),
             deferred_removals: Vec::new(),
+            service_port: None,
+            service_listener: None,
+        }
+    }
+
+    /// 啟動 `executable`:是能正常執行的假主機服務時開始聽 `service_port`,並像真的服務一樣寫下 `running.json`。
+    fn start_service(&mut self, executable: &Path) {
+        let contents = std::fs::read_to_string(executable).unwrap_or_default();
+        if !contents.starts_with("fake-host-service ") || contents.contains("broken") {
+            return;
+        }
+        let version = if contents.contains("stale") {
+            "0.0.1"
+        } else {
+            contents.split_whitespace().nth(1).unwrap()
+        };
+        let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        let marker = json!({"version": version, "port": self.service_port, "pid": 4242, "started_at_ms": started_at});
+        std::fs::write(self.home.join(".purrdr/host-service/running.json"), marker.to_string()).unwrap();
+        if let Some(port) = self.service_port {
+            self.service_listener = Some(TcpListener::bind(("127.0.0.1", port)).expect("假主機服務的埠被占用"));
+        }
+    }
+
+    fn stop_service(&mut self) {
+        self.service_listener = None;
+    }
+
+    fn installed_executable(&self) -> PathBuf {
+        let name = if self.home.join(".purrdr/host-service/bin/purrdr-host-service.exe").exists() {
+            "purrdr-host-service.exe"
+        } else {
+            "purrdr-host-service"
+        };
+        self.home.join(".purrdr/host-service/bin").join(name)
+    }
+
+    /// 執行假主機服務的執行檔(`--version`)。
+    fn host_service_executable(&mut self, program: &Path, arguments: &[String]) -> CommandOutput {
+        let contents = std::fs::read_to_string(program).unwrap();
+        let mut words = contents.split_whitespace();
+        assert_eq!(words.next(), Some("fake-host-service"), "不是假主機服務：{}", program.display());
+        let version = words.next().unwrap();
+        match arguments {
+            [flag] if flag == "--version" && !contents.contains("broken") => ok(&format!("purrdr-host-service {version}\n")),
+            [flag] if flag == "--version" => failed("dyld: missing symbol\n"),
+            other => panic!("假主機服務不認得：{other:?}"),
+        }
+    }
+
+    fn codesign(&mut self, arguments: &[String]) -> CommandOutput {
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        match arguments.as_slice() {
+            ["--verify", "--strict", requirement, file] => {
+                assert!(
+                    requirement.contains(&format!("certificate leaf[subject.OU] = \"{TEAM_ID}\"")),
+                    "一律要求正式版的 Team ID:{requirement}"
+                );
+                if std::fs::read_to_string(file).unwrap_or_default().contains("unsigned") {
+                    failed(&format!("{file}: code object is not signed at all\n"))
+                } else {
+                    ok("")
+                }
+            }
+            other => panic!("假 codesign 不認得：{other:?}"),
         }
     }
 
@@ -240,15 +325,26 @@ impl FakeSystem {
                 assert!(Path::new(plist).is_file(), "bootstrap 前 plist 要存在：{plist}");
                 let label = Path::new(plist).file_stem().unwrap().to_string_lossy().into_owned();
                 self.state.launchd_loaded.insert(label);
+                self.start_service(&self.installed_executable());
                 ok("")
             }
             ["bootout", target] => {
                 let label = target.trim_start_matches("gui/501/");
+                self.stop_service();
                 if self.state.launchd_loaded.remove(label) {
                     ok("")
                 } else {
                     failed("Boot-out failed: 3: No such process\n")
                 }
+            }
+            ["kickstart", "-k", target] => {
+                let label = target.trim_start_matches("gui/501/");
+                if !self.state.launchd_loaded.contains(label) {
+                    return failed("Could not find service\n");
+                }
+                self.stop_service();
+                self.start_service(&self.installed_executable());
+                ok("")
             }
             ["print", target] => {
                 let label = target.trim_start_matches("gui/501/");
@@ -276,12 +372,23 @@ impl FakeSystem {
                 std::fs::write(wants.join(unit), "symlink").unwrap();
                 self.state.systemd_enabled.insert((*unit).into());
                 self.state.systemd_active.insert((*unit).into());
+                self.start_service(&self.installed_executable());
                 ok("")
             }
             ["--user", "disable", "--now", unit] => {
                 let _ = std::fs::remove_file(wants.join(unit));
                 self.state.systemd_enabled.remove(*unit);
                 self.state.systemd_active.remove(*unit);
+                self.stop_service();
+                ok("")
+            }
+            ["--user", "restart", unit] => {
+                if !self.state.systemd_enabled.contains(*unit) {
+                    return failed("Unit not found\n");
+                }
+                self.stop_service();
+                self.start_service(&self.installed_executable());
+                self.state.systemd_active.insert((*unit).into());
                 ok("")
             }
             ["--user", "is-enabled", unit] => {
@@ -328,6 +435,7 @@ impl FakeSystem {
         match arguments.as_slice() {
             ["/F", "/IM", image, "/FI", filter] => {
                 assert_eq!(*filter, "USERNAME eq demo");
+                self.stop_service();
                 let before = self.state.background_processes.len();
                 self.state
                     .background_processes
@@ -377,8 +485,15 @@ impl HostSystem for FakeSystem {
         if program == "taskkill" {
             return Ok(self.taskkill(arguments));
         }
+        if program == "codesign" {
+            return Ok(self.codesign(arguments));
+        }
         if self.tailscale_program.as_deref() == Some(program) {
             return Ok(self.tailscale(arguments));
+        }
+        // 只有暫存家目錄裡的執行檔是假主機服務(真機上可能有真的 tailscale 等程式)。
+        if Path::new(program).starts_with(&self.home) && Path::new(program).is_file() {
+            return Ok(self.host_service_executable(Path::new(program), arguments));
         }
         Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("{program}: not found")))
     }
@@ -389,10 +504,14 @@ impl HostSystem for FakeSystem {
 
     fn spawn_detached(&mut self, program: &str, arguments: &[String]) -> std::io::Result<()> {
         self.commands.push(format!("spawn {program} {}", arguments.join(" ")));
+        if self.autostart_fails {
+            return Err(std::io::Error::other("cannot start"));
+        }
         assert!(Path::new(program).is_file(), "背景啟動的執行檔要存在：{program}");
         let mut process = vec![program.to_owned()];
         process.extend(arguments.iter().cloned());
         self.state.background_processes.push(process);
+        self.start_service(Path::new(program));
         Ok(())
     }
 

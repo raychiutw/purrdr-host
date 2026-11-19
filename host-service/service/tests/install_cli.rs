@@ -17,7 +17,8 @@ fn install_subcommands_are_parsed() {
             port: 47_820,
             herdr_session: None,
             https_port: None,
-            assume_yes: false
+            assume_yes: false,
+            no_auto_update: false
         }))
     );
     assert_eq!(
@@ -26,7 +27,8 @@ fn install_subcommands_are_parsed() {
             port: 47_999,
             herdr_session: Some("work".into()),
             https_port: None,
-            assume_yes: true
+            assume_yes: true,
+            no_auto_update: false
         }))
     );
     assert_eq!(
@@ -35,10 +37,51 @@ fn install_subcommands_are_parsed() {
             port: 47_820,
             herdr_session: None,
             https_port: Some(8443),
-            assume_yes: false
+            assume_yes: false,
+            no_auto_update: false
         }))
     );
     assert_eq!(InstallCommand::parse(&arguments("uninstall")), Some(Ok(InstallCommand::Uninstall)));
+    assert_eq!(
+        InstallCommand::parse(&arguments("update")),
+        Some(Ok(InstallCommand::Update {
+            check_only: false,
+            assume_yes: false
+        }))
+    );
+    assert_eq!(
+        InstallCommand::parse(&arguments("update --check")),
+        Some(Ok(InstallCommand::Update {
+            check_only: true,
+            assume_yes: false
+        }))
+    );
+    assert_eq!(
+        InstallCommand::parse(&arguments("update --yes")),
+        Some(Ok(InstallCommand::Update {
+            check_only: false,
+            assume_yes: true
+        }))
+    );
+    assert_eq!(InstallCommand::parse(&arguments("version")), Some(Ok(InstallCommand::Version)));
+    assert_eq!(
+        InstallCommand::parse(&arguments("install --no-auto-update")),
+        Some(Ok(InstallCommand::Install {
+            port: 47_820,
+            herdr_session: None,
+            https_port: None,
+            assume_yes: false,
+            no_auto_update: true
+        }))
+    );
+    assert_eq!(
+        InstallCommand::parse(&arguments("auto-update on")),
+        Some(Ok(InstallCommand::AutoUpdate { enabled: true }))
+    );
+    assert_eq!(
+        InstallCommand::parse(&arguments("auto-update off")),
+        Some(Ok(InstallCommand::AutoUpdate { enabled: false }))
+    );
     assert_eq!(InstallCommand::parse(&arguments("status")), Some(Ok(InstallCommand::Status)));
 }
 
@@ -55,6 +98,12 @@ fn other_arguments_are_left_to_the_service_or_rejected() {
         "install --https-port https",
         "uninstall --force",
         "status extra",
+        "update --force",
+        "update now",
+        "version --check",
+        "auto-update",
+        "auto-update maybe",
+        "auto-update on off",
     ] {
         assert!(matches!(InstallCommand::parse(&arguments(text)), Some(Err(_))), "{text}");
     }

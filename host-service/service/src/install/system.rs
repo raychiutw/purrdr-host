@@ -27,6 +27,45 @@ pub trait HostSystem {
 /// 只由本機的 install／uninstall／status 指令使用，WebSocket 連線碰不到。
 pub struct ProcessHostSystem;
 
+/// 背景自動更新：以獨立程序執行 `<執行檔> update --yes`。服務重啟時會結束自己的程序，
+/// 所以更新程序要脫離它：Linux 放進另一個 systemd unit(同一個 cgroup 會一起被結束，所以 `systemd_run` 失敗就回報、不改用別的方式),
+/// macOS 另開 process group(launchd 只結束 job 的 group),Windows 是不同的執行檔名稱(重啟只結束背景執行檔)。
+pub fn spawn_update_helper(executable: &Path, systemd_run: &str) -> std::io::Result<()> {
+    let arguments = ["update", "--yes"];
+    if cfg!(target_os = "linux") {
+        let status = Command::new(systemd_run)
+            .args(["--user", "--collect", "--quiet"])
+            .arg(executable)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!("{systemd_run} failed ({status})")))
+        };
+    }
+    let mut command = Command::new(executable);
+    command.args(arguments).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 隱藏的 console 讓它執行的 taskkill 不會跳出視窗。
+        command.creation_flags(windows_flags::CREATE_NO_WINDOW | windows_flags::CREATE_NEW_PROCESS_GROUP);
+    }
+    let mut child = command.spawn()?;
+    // 收掉結束的子程序(服務沒被重啟時)。
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 #[cfg(windows)]
 mod windows_flags {
     pub const DETACHED_PROCESS: u32 = 0x0000_0008;

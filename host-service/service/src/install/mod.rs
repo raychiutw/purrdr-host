@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 
 mod autostart;
 mod command;
+mod location;
 pub mod system;
 mod tailscale;
 
 pub use command::run_command;
+pub use location::{HelperLauncher, InstalledService};
 use system::HostSystem;
 use tailscale::Tailscale;
 
@@ -72,6 +74,8 @@ pub struct HostStatus {
     pub https_address: Option<String>,
     pub serve: ServeStatus,
     pub herdr: HerdrStatus,
+    /// 安裝紀錄的 `auto_update`;沒有安裝時 None。
+    pub auto_update: Option<bool>,
 }
 
 impl std::fmt::Display for HostStatus {
@@ -79,6 +83,9 @@ impl std::fmt::Display for HostStatus {
         let yes_no = |value: bool| if value { "yes" } else { "no" };
         writeln!(formatter, "host service: {}", if self.installed { "installed" } else { "not installed" })?;
         writeln!(formatter, "  starts at login: {}", yes_no(self.autostart_registered))?;
+        if let Some(auto_update) = self.auto_update {
+            writeln!(formatter, "  auto update: {}", if auto_update { "on" } else { "off" })?;
+        }
         writeln!(formatter, "  listening on 127.0.0.1:{}: {}", self.port, yes_no(self.listening))?;
         if let Some(address) = &self.https_address {
             writeln!(formatter, "  HTTPS address: {address}")?;
@@ -140,29 +147,61 @@ pub enum InstallCommand {
         /// `tailscale serve` 的 HTTPS 埠;沒指定時沿用上次安裝，或 443。
         https_port: Option<u16>,
         assume_yes: bool,
+        /// `--no-auto-update`:關閉自動更新。
+        no_auto_update: bool,
     },
     Uninstall,
     Status,
+    /// `update [--check] [--yes]`:更新到最新版(raychiutw/purrdr.host#6)。
+    Update {
+        check_only: bool,
+        assume_yes: bool,
+    },
+    /// `version`:已安裝與最新的版本。
+    Version,
+    /// `auto-update on|off`。
+    AutoUpdate {
+        enabled: bool,
+    },
 }
 
 impl InstallCommand {
-    /// 第一個參數是 `install`／`uninstall`／`status` 時解析;其他交給主機服務本身。
+    /// 第一個參數是 `install`／`uninstall`／`status`／`update`／`version` 時解析;其他交給主機服務本身。
     pub fn parse(arguments: &[String]) -> Option<Result<Self, String>> {
         let (name, options) = arguments.split_first()?;
         let command = match name.as_str() {
             "install" => Self::parse_install(options),
-            "uninstall" | "status" => match options.first() {
+            "uninstall" | "status" | "version" => match options.first() {
                 Some(extra) => Err(format!("unknown argument: {extra}")),
                 None if name == "status" => Ok(InstallCommand::Status),
+                None if name == "version" => Ok(InstallCommand::Version),
                 None => Ok(InstallCommand::Uninstall),
+            },
+            "update" => Self::parse_update(options),
+            "auto-update" => match options {
+                [switch] if switch == "on" || switch == "off" => Ok(InstallCommand::AutoUpdate { enabled: switch == "on" }),
+                _ => Err("usage: purrdr-host-service auto-update on|off".to_owned()),
             },
             _ => return None,
         };
         Some(command)
     }
 
+    fn parse_update(options: &[String]) -> Result<Self, String> {
+        let (mut check_only, mut assume_yes) = (false, false);
+        for option in options {
+            match option.as_str() {
+                "--check" => check_only = true,
+                "--yes" => assume_yes = true,
+                other => return Err(format!("unknown argument: {other}")),
+            }
+        }
+        Ok(InstallCommand::Update { check_only, assume_yes })
+    }
+
     fn parse_install(options: &[String]) -> Result<Self, String> {
         let (mut port, mut herdr_session, mut https_port, mut assume_yes) = (crate::DEFAULT_PORT, None, None, false);
+        let mut no_auto_update = false;
         let mut remaining = options.iter();
         while let Some(option) = remaining.next() {
             let mut value = || remaining.next().ok_or_else(|| format!("{option} needs a value"));
@@ -182,6 +221,7 @@ impl InstallCommand {
                 }
                 "--session" => herdr_session = Some(value()?.clone()),
                 "--yes" => assume_yes = true,
+                "--no-auto-update" => no_auto_update = true,
                 other => return Err(format!("unknown argument: {other}")),
             }
         }
@@ -190,6 +230,7 @@ impl InstallCommand {
             herdr_session,
             https_port,
             assume_yes,
+            no_auto_update,
         })
     }
 }
@@ -201,6 +242,8 @@ pub struct InstallOptions {
     pub herdr_session: Option<String>,
     /// `--https-port`;`None` 時沿用上次安裝的埠，或 443。
     pub https_port: Option<u16>,
+    /// `--no-auto-update` 時 `Some(false)`;`None` 時沿用上次安裝，或開啟。
+    pub auto_update: Option<bool>,
     /// 放下載的執行檔的資料夾。
     pub source_directory: PathBuf,
 }
@@ -263,6 +306,7 @@ pub fn rerun_install_command(prefix: &str, command: &InstallCommand, platform: I
         herdr_session,
         https_port,
         assume_yes,
+        no_auto_update,
     } = command
     else {
         return prefix.to_owned();
@@ -276,6 +320,9 @@ pub fn rerun_install_command(prefix: &str, command: &InstallCommand, platform: I
     }
     if *assume_yes {
         parts.push("--yes".to_owned());
+    }
+    if *no_auto_update {
+        parts.push("--no-auto-update".to_owned());
     }
     if let Some(https_port) = https_port {
         parts.push(format!("{HTTPS_PORT_OPTION} {https_port}"));
@@ -415,6 +462,14 @@ pub(crate) struct ServiceLayout {
 }
 
 impl ServiceLayout {
+    fn of(environment: &HostEnvironment) -> Self {
+        ServiceLayout {
+            platform: environment.platform,
+            home: environment.home.clone(),
+            xdg_config_home: environment.xdg_config_home.clone(),
+        }
+    }
+
     fn directory(&self) -> PathBuf {
         crate::state_directory::default_state_directory(&self.home)
     }
@@ -477,6 +532,13 @@ struct InstallRecord {
     serve_configured: bool,
     /// 安裝時新建的資料夾(相對家目錄),解除安裝時若是空的就刪除。
     created_directories: Vec<String>,
+    /// 背景自動更新(0.5.0 以前的紀錄沒有這欄，視為開啟)。
+    #[serde(default = "enabled")]
+    auto_update: bool,
+}
+
+fn enabled() -> bool {
+    true
 }
 
 fn default_https_port() -> u16 {
@@ -515,12 +577,13 @@ impl<S: HostSystem> Installer<S> {
         &self.system
     }
 
+    /// 取回安裝用的系統(測試接著交給更新流程)。
+    pub fn into_system(self) -> S {
+        self.system
+    }
+
     fn layout(&self) -> ServiceLayout {
-        ServiceLayout {
-            platform: self.environment.platform,
-            home: self.environment.home.clone(),
-            xdg_config_home: self.environment.xdg_config_home.clone(),
-        }
+        ServiceLayout::of(&self.environment)
     }
 
     /// 檢查前置條件、複製執行檔、設定 `tailscale serve` 與登入後自動啟動。
@@ -570,6 +633,7 @@ impl<S: HostSystem> Installer<S> {
             https_address: tailscale::https_address(&host_name, https_port),
             serve_configured: previous.as_ref().is_some_and(|record| record.serve_configured),
             created_directories: previous.as_ref().map(|record| record.created_directories.clone()).unwrap_or_default(),
+            auto_update: options.auto_update.or(previous.as_ref().map(|record| record.auto_update)).unwrap_or(true),
         };
         if previous.is_some() {
             // 先停掉執行中的舊版，執行檔才換得掉(Windows)。
@@ -626,13 +690,7 @@ impl<S: HostSystem> Installer<S> {
     }
 
     fn read_record(&self, layout: &ServiceLayout) -> Result<Option<InstallRecord>, InstallError> {
-        let text = match std::fs::read_to_string(layout.record_file()) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            result => result.map_err(InstallError::io)?,
-        };
-        serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|error| InstallError::Io(format!("{}: {error}", layout.record_file().display())))
+        read_install_record(layout)
     }
 
     /// 安裝的每一步;`record` 隨時反映已做的變更，失敗時依它還原。
@@ -687,6 +745,14 @@ impl<S: HostSystem> Installer<S> {
         let _ = self.remove_files(layout, record);
     }
 
+    /// `auto-update on|off`:改安裝紀錄的 `auto_update`。
+    pub fn set_auto_update(&mut self, enabled: bool) -> Result<(), InstallError> {
+        let layout = self.layout();
+        let mut record = self.read_record(&layout)?.ok_or(InstallError::NotInstalled)?;
+        record.auto_update = enabled;
+        write_json(&layout.record_file(), &record)
+    }
+
     /// 主機服務、自動啟動、`tailscale serve` 與 herdr 的狀態。
     pub async fn status(&mut self, socket_environment: &SocketEnvironment) -> HostStatus {
         let layout = self.layout();
@@ -702,6 +768,7 @@ impl<S: HostSystem> Installer<S> {
                 Err(error) => ServeStatus::Unavailable(error.to_string()),
             };
         let session = record.as_ref().and_then(|record| record.herdr_session.clone());
+        let auto_update_setting = record.as_ref().map(|record| record.auto_update);
         HostStatus {
             installed: record.is_some(),
             autostart_registered: autostart::is_registered(&mut self.system, &layout),
@@ -711,6 +778,7 @@ impl<S: HostSystem> Installer<S> {
             https_address: record.map(|record| record.https_address),
             serve,
             herdr: herdr_status(self.environment.platform, session.as_deref(), socket_environment).await,
+            auto_update: auto_update_setting,
         }
     }
 
@@ -780,6 +848,17 @@ impl<S: HostSystem> Installer<S> {
             record.created_directories.push(relative.to_string_lossy().replace('\\', "/"));
         }
     }
+}
+
+/// 讀安裝紀錄;沒有安裝時回 None。
+fn read_install_record(layout: &ServiceLayout) -> Result<Option<InstallRecord>, InstallError> {
+    let text = match std::fs::read_to_string(layout.record_file()) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        result => result.map_err(InstallError::io)?,
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|error| InstallError::Io(format!("{}: {error}", layout.record_file().display())))
 }
 
 async fn is_listening(port: u16) -> bool {

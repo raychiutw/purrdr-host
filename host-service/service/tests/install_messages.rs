@@ -94,13 +94,14 @@ fn rerun_command_repeats_every_given_option_including_the_https_port() {
         herdr_session: Some("work".into()),
         https_port: Some(8443),
         assume_yes: true,
+        no_auto_update: true,
     };
 
     let rerun = rerun_install_command("curl -fsSL https://example.test/install.sh | sh -s --", &command, InstallPlatform::Linux);
 
     assert_eq!(
         rerun,
-        "curl -fsSL https://example.test/install.sh | sh -s -- --port 47999 --session work --yes --https-port 8443"
+        "curl -fsSL https://example.test/install.sh | sh -s -- --port 47999 --session work --yes --no-auto-update --https-port 8443"
     );
 }
 
@@ -111,6 +112,7 @@ fn rerun_command_quotes_a_session_name_for_the_shell_that_runs_it() {
         herdr_session: Some(session.into()),
         https_port: None,
         assume_yes: false,
+        no_auto_update: false,
     };
 
     let posix = rerun_install_command("sh -s --", &command("my work; rm -rf ~"), InstallPlatform::MacOs);
@@ -129,6 +131,7 @@ fn taken_https_port_suggests_the_other_port_without_repeating_the_taken_one() {
         herdr_session: None,
         https_port: Some(8443),
         assume_yes: true,
+        no_auto_update: false,
     };
     let rerun = rerun_install_command("sh -s --", &command, InstallPlatform::Linux);
     let error = InstallError::ServePortTaken {

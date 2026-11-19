@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub mod audit_log;
+pub mod auto_update;
 mod connection;
 pub mod device_store;
 pub mod herdr_cli;
@@ -18,9 +19,11 @@ pub mod management;
 mod pane_terminal;
 #[rustfmt::skip] // 由 codegen 產生。
 pub mod protocol;
+pub mod running_service;
 pub mod state_directory;
 pub mod transcript;
 mod transcript_session;
+pub mod update;
 
 mod service_main;
 
