@@ -67,7 +67,7 @@ CI(`.github/workflows/ci.yml`,`pull_request` 與 `workflow_call`):macOS(`macos-2
 ## 主機外掛(`host-plugin/`,ADR-0004、raychiutw/purrdr.ios#29)
 
 - herdr plugin manifest(`herdr-plugin.toml`,id `purrdr.push`)+ `notify.sh`(macOS／Linux,sh + curl)／`notify.ps1`(Windows,best-effort;herdr 的 plugin 在 Windows 仍是 preview)。herdr 在 `pane.agent_status_changed` 時以新程序執行，沒有常駐程序、不寫狀態。
-- 發佈成公開 repo `raychiutw/purrdr-host-plugin` 後，由 app 經 SSH `herdr plugin install raychiutw/purrdr-host-plugin --yes` 安裝(app 的來源常數 `PushSettings.pluginSource`)。
+- app 經 SSH 以 `herdr plugin install raychiutw/purrdr-host/host-plugin --yes` 直接從本 repo 的子資料夾安裝(herdr 支援 `OWNER/REPO/SUBDIR`;app 的來源常數 `PushSettings.pluginSource`),不另外發佈 repo。
 - 每支裝置的配對檔 `~/.purrdr/push-<裝置 id>/pairing`(app 經 `ReversibleHostWrite` 寫入，格式見 app 的 `PushPairingFile`:`purrdr-push 1`、`endpoint=`、`key=`、`muted=<session>`)。Agent 進入 blocked 時對每支裝置 POST 後台 `/v1/push`,只帶 workspace 名稱、狀態與 pane id,**不帶終端機標題或任何對話內容**;配對密鑰經 stdin 交給 curl,不出現在參數。某支裝置靜音了這個聊天(Agent 的 session 值)就跳過它，有靜音時才問 herdr 一次(`herdr pane get`)。
 - 測試 `host-service/plugin-tests/tests/notify_script.rs`(移植自 app repo 的 `HostPluginScriptTests`):在暫存家目錄以真的 `sh` 執行 `notify.sh`,`curl`／`herdr` 換成家目錄 `bin/` 的假程式，記錄參數與 stdin,不連網路。執行腳本的測試只在 Unix 跑(`#[cfg(unix)]`);`notify.ps1` 沒有自動測試。manifest 的檢查三平台都跑。
 
