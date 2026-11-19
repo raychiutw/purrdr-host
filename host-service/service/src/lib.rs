@@ -19,6 +19,7 @@ pub mod management;
 mod pane_terminal;
 #[rustfmt::skip] // 由 codegen 產生。
 pub mod protocol;
+pub mod running_service;
 pub mod state_directory;
 pub mod transcript;
 mod transcript_session;

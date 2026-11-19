@@ -15,6 +15,7 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
         }
     };
     let herdr_socket = config.herdr_socket.native_name();
+    let state_directory = config.state_directory.clone();
     let service = match crate::start(config).await {
         Ok(service) => service,
         Err(error) => {
@@ -27,6 +28,9 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
         env!("CARGO_PKG_VERSION"),
         service.local_addr()
     );
+    if let Err(error) = crate::running_service::write(&state_directory, service.local_addr().port()) {
+        eprintln!("cannot write running.json: {error}");
+    }
     // 安裝好的那份才會自動更新(開發中直接執行的不會)。
     let _auto_update = crate::auto_update::spawn_for_installed_service();
     service.wait().await;

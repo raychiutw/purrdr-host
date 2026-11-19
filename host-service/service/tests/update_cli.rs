@@ -220,3 +220,31 @@ fn auto_update_without_install_says_how_to_install() {
     assert!(stderr(&output).contains("\nNext: "), "{output:?}");
     assert_eq!(std::fs::read_dir(&empty.0).unwrap().count(), 0);
 }
+
+#[test]
+fn running_service_tells_the_updater_its_version() {
+    let state = TempDirectory::new("running-marker");
+    let mut service = Command::new(host_service_executable())
+        .args(["--port", "0", "--state-dir"])
+        .arg(&state.0)
+        .env("HERDR_SOCKET_PATH", "purrdr-running-marker-missing-socket")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let marker_file = state.0.join("running.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !marker_file.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let marker = std::fs::read_to_string(&marker_file);
+    let _ = service.kill();
+    let _ = service.wait();
+
+    let marker: serde_json::Value = serde_json::from_str(&marker.expect("服務啟動後要寫 running.json")).unwrap();
+    assert_eq!(marker["version"], BUILT);
+    assert_eq!(marker["pid"], service.id());
+    let port = marker["port"].as_u64().unwrap();
+    assert!(port > 0, "{marker}");
+    assert!(marker["started_at_ms"].as_u64().unwrap() > 0, "{marker}");
+}

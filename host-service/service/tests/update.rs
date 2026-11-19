@@ -5,9 +5,9 @@ mod install_support;
 use std::time::Duration;
 
 use install_support::release::{FakeReleaseServer, sha256_hex};
-use install_support::{FakeSystem, TestHost, executable_names, fake_host_service, snapshot};
+use install_support::{FakeSystem, LAUNCH_AGENT_LABEL, RUN_VALUE, SYSTEMD_UNIT, TEAM_ID, TestHost, executable_names, fake_host_service, snapshot};
 use purrdr_host_service::install::{InstallPlatform, InstalledService, Installer};
-use purrdr_host_service::update::{AutomaticOutcome, HttpReleaseSource, UpdateError, UpdateLauncher, UpdateOutcome, Updater, Version};
+use purrdr_host_service::update::{AutomaticOutcome, HttpReleaseSource, InstallLocation, UpdateError, UpdateLauncher, UpdateOutcome, Updater, Version};
 
 const PLATFORMS: [InstallPlatform; 3] = [InstallPlatform::MacOs, InstallPlatform::Linux, InstallPlatform::Windows];
 const INSTALLED: &str = "0.5.0";
@@ -43,13 +43,28 @@ impl InstalledHost {
         let mut installer = Installer::new(host.environment(), system);
         installer.install(&host.options(port), |_| true).unwrap();
         std::fs::write(host.service_directory().join("devices.json"), r#"{"devices":["paired"]}"#).unwrap();
-        let system = installer.into_system();
+        let mut system = installer.into_system();
+        system.commands.clear();
         assert!(is_listening(port), "安裝後背景服務要在聽");
         InstalledHost {
             host,
             port,
             system: Some(system),
         }
+    }
+
+    /// 同一個家目錄的另一個安裝位置(例如另一個更新程序)。
+    fn another_location(&self) -> InstalledService<FakeSystem> {
+        InstalledService::new(self.host.environment(), FakeSystem::ready(&self.host.home.0))
+    }
+
+    fn registration(&self) -> Option<String> {
+        let file = match self.host.platform {
+            InstallPlatform::MacOs => self.host.home.0.join(format!("Library/LaunchAgents/{LAUNCH_AGENT_LABEL}.plist")),
+            InstallPlatform::Linux => self.host.home.0.join(".config/systemd/user").join(SYSTEMD_UNIT),
+            InstallPlatform::Windows => return None,
+        };
+        Some(std::fs::read_to_string(file).unwrap())
     }
 
     fn updater(&mut self, server: &FakeReleaseServer) -> Updater<HttpReleaseSource, InstalledService<FakeSystem>> {
@@ -70,10 +85,14 @@ impl InstalledHost {
     }
 }
 
-/// 家目錄快照，不含更新結果的紀錄(`update.json`、`logs/update.log`)。
+/// 家目錄快照，不含更新的紀錄與鎖(`update.json`、`update.lock`、`logs/update.log`)。
 fn home_without_update_record(host: &TestHost) -> std::collections::BTreeMap<String, Option<String>> {
     let mut entries = snapshot(&host.home.0);
-    entries.retain(|path, _| !path.ends_with(".purrdr/host-service/update.json") && !path.ends_with(".purrdr/host-service/logs/update.log"));
+    entries.retain(|path, _| {
+        !["update.json", "update.lock", "logs/update.log"]
+            .iter()
+            .any(|name| path.ends_with(&format!(".purrdr/host-service/{name}")))
+    });
     entries
 }
 
@@ -460,4 +479,282 @@ fn only_the_installed_copy_runs_automatic_updates() {
     assert!(!downloaded.runs_installed_copy());
     assert!(in_place.runs_installed_copy());
     assert!(!not_installed.runs_installed_copy());
+}
+
+/// 自動啟動的登記(檔案、launchd／systemd／Run 值)與服務都在。
+fn assert_still_registered_and_running(
+    updater: &Updater<HttpReleaseSource, InstalledService<FakeSystem>>,
+    installed: &InstalledHost,
+    registration: &Option<String>,
+) {
+    let platform = installed.host.platform;
+    let system = updater.location().system();
+    assert_eq!(&installed.registration(), registration, "{platform:?}:登記檔不變");
+    match platform {
+        InstallPlatform::MacOs => assert!(system.state.launchd_loaded.contains(LAUNCH_AGENT_LABEL)),
+        InstallPlatform::Linux => assert!(system.state.systemd_enabled.contains(SYSTEMD_UNIT)),
+        InstallPlatform::Windows => assert!(system.state.run_values.contains_key(RUN_VALUE)),
+    }
+    let removing = ["launchctl bootout", "systemctl --user disable", "reg delete", "reg add"];
+    let commands = &system.commands;
+    assert!(
+        !commands.iter().any(|command| removing.iter().any(|prefix| command.starts_with(prefix))),
+        "{platform:?}:重啟不取消登記：{commands:?}"
+    );
+    assert!(is_listening(installed.port), "{platform:?}:服務要在跑");
+}
+
+#[test]
+fn update_restarts_in_place_without_unregistering_and_cleans_up_the_previous_executables() {
+    for platform in PLATFORMS {
+        let mut installed = InstalledHost::new(platform);
+        let registration = installed.registration();
+        let server = FakeReleaseServer::start();
+        publish(&server, platform, "0.5.1", "");
+        let mut updater = installed.updater(&server);
+
+        updater.apply().unwrap();
+
+        assert_still_registered_and_running(&updater, &installed, &registration);
+        let bin: Vec<String> = std::fs::read_dir(installed.host.service_directory().join("bin"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(!bin.iter().any(|name| name.ends_with(".previous")), "{platform:?}:成功後清掉舊執行檔：{bin:?}");
+        let leftovers: Vec<String> = std::fs::read_dir(installed.host.service_directory())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("update-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{platform:?}:暫存資料夾沒清掉：{leftovers:?}");
+    }
+}
+
+#[test]
+fn rollback_restarts_in_place_and_keeps_the_service_registered() {
+    for platform in PLATFORMS {
+        let mut installed = InstalledHost::new(platform);
+        let registration = installed.registration();
+        let server = FakeReleaseServer::start();
+        publish(&server, platform, "0.5.1", "broken");
+        let mut updater = installed.updater(&server);
+
+        assert!(matches!(updater.apply(), Err(UpdateError::RolledBack { .. })), "{platform:?}");
+
+        assert_still_registered_and_running(&updater, &installed, &registration);
+    }
+}
+
+#[test]
+fn failed_replacement_puts_the_old_executables_back_and_leaves_the_service_running() {
+    for platform in PLATFORMS {
+        let mut installed = InstalledHost::new(platform);
+        let registration = installed.registration();
+        let last = *executable_names(platform).last().unwrap();
+        // 最後一個執行檔換不掉：它的 `.previous` 位置被一個資料夾占住。
+        let obstacle = installed.host.service_directory().join("bin").join(format!("{last}.previous"));
+        std::fs::create_dir_all(obstacle.join("in-the-way")).unwrap();
+        let server = FakeReleaseServer::start();
+        publish(&server, platform, "0.5.1", "");
+        let mut updater = installed.updater(&server);
+
+        let error = updater.apply().unwrap_err();
+
+        assert!(matches!(error, UpdateError::Io(_)), "{platform:?}: {error:?}");
+        for name in executable_names(platform) {
+            assert!(
+                installed.installed_executable(name).starts_with("fake-host-service 0.5.0 "),
+                "{platform:?} {name}"
+            );
+        }
+        assert_still_registered_and_running(&updater, &installed, &registration);
+    }
+}
+
+#[test]
+fn restart_counts_only_when_the_running_service_reports_the_new_version() {
+    for platform in PLATFORMS {
+        let mut installed = InstalledHost::new(platform);
+        let server = FakeReleaseServer::start();
+        publish(&server, platform, "0.5.1", "stale");
+        let mut updater = installed.updater(&server);
+
+        let error = updater.apply().unwrap_err();
+
+        assert!(matches!(error, UpdateError::RolledBack { .. }), "{platform:?}: {error:?}");
+        assert!(
+            installed
+                .installed_executable(executable_names(platform)[0])
+                .starts_with("fake-host-service 0.5.0 ")
+        );
+    }
+}
+
+#[test]
+fn only_one_update_runs_at_a_time() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let mut other_update = installed.another_location();
+    let _held = other_update.lock().unwrap();
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "");
+    let home_before = home_without_update_record(&installed.host);
+    let mut updater = installed.updater(&server);
+
+    let error = updater.apply().unwrap_err();
+
+    assert_eq!(error, UpdateError::InProgress);
+    let message = error.explain("purrdr-host-service update");
+    assert!(message.contains("already in progress") && message.contains("Next:"), "{message}");
+    assert_eq!(home_without_update_record(&installed.host), home_before);
+    drop(_held);
+    assert!(matches!(updater.apply(), Ok(UpdateOutcome::Updated { .. })), "鎖放開後可以更新");
+}
+
+#[test]
+fn every_update_unpacks_into_its_own_staging_folder() {
+    let installed = InstalledHost::new(InstallPlatform::Linux);
+    let location = installed.another_location();
+
+    let (first, second) = (location.staging_directory(), location.staging_directory());
+
+    assert_ne!(first, second);
+    assert!(first.starts_with(installed.host.service_directory()), "{}", first.display());
+}
+
+#[test]
+fn macos_requires_the_purrdr_team_even_when_the_installed_copy_is_unsigned() {
+    let mut installed = InstalledHost::new(InstallPlatform::MacOs);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::MacOs, "0.5.1", "");
+    let mut updater = installed.updater(&server);
+
+    updater.apply().unwrap();
+
+    let commands = &updater.location().system().commands;
+    assert!(
+        !commands.iter().any(|command| command.starts_with("codesign -dv")),
+        "不從已安裝的執行檔取 Team ID:{commands:?}"
+    );
+    assert!(commands.iter().any(|command| command.contains(TEAM_ID)), "{commands:?}");
+}
+
+#[test]
+fn a_rolled_back_version_is_not_retried_automatically_but_can_be_updated_by_hand() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "broken");
+    let mut updater = installed.updater(&server);
+    assert!(matches!(updater.apply(), Err(UpdateError::RolledBack { .. })));
+    let mut launcher = FakeLauncher::default();
+
+    let same_version = updater.automatic(&mut launcher);
+    let skipped_record = updater.check().unwrap().last_result.unwrap().result;
+    let downloads_before = server.requests().len();
+    let by_hand = updater.apply();
+    let downloaded_again = server.requests().len() > downloads_before + 1;
+    publish(&server, InstallPlatform::Linux, "0.5.2", "");
+    let newer_version = updater.automatic(&mut launcher);
+
+    assert_eq!(same_version, AutomaticOutcome::Skipped(version("0.5.1")));
+    assert!(skipped_record.contains("0.5.1") && skipped_record.contains("rolled back"), "{skipped_record}");
+    assert!(matches!(by_hand, Err(UpdateError::RolledBack { .. })), "手動 update 仍會再試：{by_hand:?}");
+    assert!(downloaded_again, "{:?}", server.requests());
+    assert!(matches!(newer_version, AutomaticOutcome::Started { .. }), "{newer_version:?}");
+    assert_eq!(launcher.launches, 1);
+}
+
+#[test]
+fn downloads_do_not_ask_for_json() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "");
+
+    installed.updater(&server).apply().unwrap();
+
+    for (path, headers) in server.request_headers() {
+        let asks_for_json = headers.iter().any(|header| header.starts_with("accept:") && header.contains("json"));
+        assert_eq!(asks_for_json, path == "/releases/latest", "{path}: {headers:?}");
+    }
+}
+
+/// 壓縮檔裡多一個連結項目(指向壓縮檔裡的執行檔，解壓工具本身會照做)。
+fn archive_with_link(platform: InstallPlatform, kind: tar::EntryType) -> Vec<u8> {
+    use std::io::Write;
+    let target = executable_names(platform)[0];
+    if platform == InstallPlatform::Windows {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for name in executable_names(platform) {
+            writer.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            writer.write_all(fake_host_service("0.5.1", name).as_bytes()).unwrap();
+        }
+        writer.add_symlink("shortcut", target, zip::write::SimpleFileOptions::default()).unwrap();
+        return writer.finish().unwrap().into_inner();
+    }
+    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default()));
+    for name in executable_names(platform) {
+        let contents = fake_host_service("0.5.1", name);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder.append_data(&mut header, name, contents.as_bytes()).unwrap();
+    }
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(kind);
+    header.set_size(0);
+    builder.append_link(&mut header, "shortcut", target).unwrap();
+    builder.into_inner().unwrap().finish().unwrap()
+}
+
+#[test]
+fn archives_with_links_are_refused() {
+    let cases = [
+        (InstallPlatform::MacOs, tar::EntryType::Symlink),
+        (InstallPlatform::Linux, tar::EntryType::Symlink),
+        (InstallPlatform::Linux, tar::EntryType::Link),
+        (InstallPlatform::Windows, tar::EntryType::Symlink),
+    ];
+    for (platform, kind) in cases {
+        let mut installed = InstalledHost::new(platform);
+        let server = FakeReleaseServer::start();
+        publish(&server, platform, "0.5.1", "");
+        let archive = archive_with_link(platform, kind);
+        let asset = install_support::release::asset_name(platform);
+        server.put(&format!("releases/download/host-service-v0.5.1/{asset}"), archive.clone());
+        server.put(
+            "releases/download/host-service-v0.5.1/SHA256SUMS",
+            format!("{}  {asset}\n", sha256_hex(&archive)).into_bytes(),
+        );
+        let home_before = home_without_update_record(&installed.host);
+        let mut updater = installed.updater(&server);
+
+        let error = updater.apply().unwrap_err();
+
+        assert!(
+            matches!(&error, UpdateError::Io(message) if message.contains("link")),
+            "{platform:?}: {error:?}"
+        );
+        assert_eq!(home_without_update_record(&installed.host), home_before, "{platform:?}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_helper_needs_systemd_run_and_does_not_pass_the_release_source() {
+    use purrdr_host_service::install::HelperLauncher;
+    let scratch = install_support::TempDirectory::new("systemd-run");
+    let record = scratch.0.join("arguments");
+    let fake_systemd_run = scratch.0.join("systemd-run");
+    std::fs::write(&fake_systemd_run, format!("#!/bin/sh\necho \"$@\" > {}\n", record.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake_systemd_run, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let missing = HelperLauncher::new("/bin/true".into(), scratch.0.join("no-systemd-run").display().to_string()).launch();
+    let launched = HelperLauncher::new("/bin/true".into(), fake_systemd_run.display().to_string()).launch();
+
+    assert!(missing.is_err(), "沒有 systemd-run 時不改用會被一起結束的方式");
+    assert!(launched.is_ok(), "{launched:?}");
+    let arguments = std::fs::read_to_string(record).unwrap();
+    assert!(arguments.starts_with("--user --collect --quiet /bin/true update --yes"), "{arguments}");
+    assert!(!arguments.contains("--setenv"), "{arguments}");
 }

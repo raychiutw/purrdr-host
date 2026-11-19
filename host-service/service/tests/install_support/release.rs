@@ -47,6 +47,8 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 type Files = Arc<Mutex<BTreeMap<String, Vec<u8>>>>;
+/// 每個請求的路徑與標頭。
+type Headers = Arc<Mutex<Vec<(String, Vec<String>)>>>;
 
 /// 測試結束(drop)時停止的假 Release 伺服器。
 pub struct FakeReleaseServer {
@@ -54,6 +56,7 @@ pub struct FakeReleaseServer {
     files: Files,
     stopped: Arc<AtomicBool>,
     requests: Arc<Mutex<Vec<String>>>,
+    headers: Headers,
 }
 
 impl FakeReleaseServer {
@@ -63,14 +66,15 @@ impl FakeReleaseServer {
         let files: Files = Arc::default();
         let stopped = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let (thread_files, thread_stopped, thread_requests) = (files.clone(), stopped.clone(), requests.clone());
+        let headers: Headers = Arc::default();
+        let (thread_files, thread_stopped, thread_requests, thread_headers) = (files.clone(), stopped.clone(), requests.clone(), headers.clone());
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 if thread_stopped.load(Ordering::SeqCst) {
                     break;
                 }
                 if let Ok(stream) = stream {
-                    respond(stream, &thread_files, &thread_requests);
+                    respond(stream, &thread_files, &thread_requests, &thread_headers);
                 }
             }
         });
@@ -79,7 +83,13 @@ impl FakeReleaseServer {
             files,
             stopped,
             requests,
+            headers,
         }
+    }
+
+    /// 每個請求的路徑與標頭(小寫)。
+    pub fn request_headers(&self) -> Vec<(String, Vec<String>)> {
+        self.headers.lock().unwrap().clone()
     }
 
     /// 傳給 `HttpReleaseSource::at` 的位址。
@@ -120,20 +130,23 @@ impl Drop for FakeReleaseServer {
     }
 }
 
-fn respond(mut stream: TcpStream, files: &Files, requests: &Mutex<Vec<String>>) {
+fn respond(mut stream: TcpStream, files: &Files, requests: &Mutex<Vec<String>>, headers: &Headers) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() {
         return;
     }
+    let mut received = Vec::new();
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
             break;
         }
+        received.push(header.trim_end().to_ascii_lowercase());
     }
     let path = request_line.split_whitespace().nth(1).unwrap_or("/").to_owned();
     requests.lock().unwrap().push(path.clone());
+    headers.lock().unwrap().push((path.clone(), received));
     let response = files.lock().unwrap().get(&path).cloned();
     let (status, body) = match response {
         Some(body) => ("200 OK", body),

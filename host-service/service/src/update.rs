@@ -94,6 +94,8 @@ pub enum UpdateError {
         restored: Version,
         reason: String,
     },
+    /// 已有另一個更新在進行。
+    InProgress,
     /// 新版起不來，換回原版本也失敗。
     RollbackFailed {
         failed: Version,
@@ -134,6 +136,10 @@ impl UpdateError {
                 install_command()
             ),
             UpdateError::Io(message) => format!("{message}\nNext: fix the problem above, then run again:\n  {rerun}"),
+            UpdateError::InProgress => format!(
+                "Another update of the host service is already in progress, so this one did not start.\n\
+                 Next: wait a minute, then run again:\n  {rerun}"
+            ),
         }
     }
 }
@@ -212,6 +218,8 @@ pub enum AutomaticOutcome {
     /// 自動更新關閉，沒有檢查。
     Disabled,
     UpToDate(Version),
+    /// 這個版本上次更新後退回過，不再自動重試(手動 `update` 仍可)。
+    Skipped(Version),
     /// 已啟動更新程序(由它套用並記錄結果)。
     Started {
         from: Version,
@@ -223,6 +231,22 @@ pub enum AutomaticOutcome {
 /// 啟動獨立的更新程序(`update --yes`):服務重啟時它不會跟著被結束。
 pub trait UpdateLauncher {
     fn launch(&mut self) -> Result<(), String>;
+}
+
+/// 更新鎖;drop 時放開。
+pub struct UpdateLock {
+    _file: Option<std::fs::File>,
+}
+
+impl UpdateLock {
+    /// 不鎖任何東西(測試替身用)。
+    pub fn none() -> Self {
+        UpdateLock { _file: None }
+    }
+
+    pub(crate) fn holding(file: std::fs::File) -> Self {
+        UpdateLock { _file: Some(file) }
+    }
 }
 
 /// Release 來源：最新版本與該版本的檔案。
@@ -250,6 +274,13 @@ pub trait InstallLocation {
     /// 記下這次檢查或更新的結果(狀態檔與紀錄檔)。
     fn record_result(&mut self, record: &UpdateRecord);
     fn last_result(&mut self) -> Option<UpdateRecord>;
+    /// 拿更新鎖(手動與自動互斥);已有更新在進行時回 `InProgress`。
+    fn lock(&mut self) -> Result<UpdateLock, UpdateError>;
+    /// 上次更新後退回的版本(不再自動重試)。
+    fn rolled_back_version(&mut self) -> Option<Version>;
+    fn set_rolled_back_version(&mut self, version: Option<Version>);
+    /// 更新成功後刪掉留下的舊執行檔。
+    fn discard_previous(&mut self);
 }
 
 /// 以 HTTP 取 Release(正式是 GitHub)。
@@ -261,11 +292,15 @@ pub struct HttpReleaseSource {
 
 impl HttpReleaseSource {
     /// `PURRDR_HOST_SERVICE_RELEASE_URL`(測試與實機驗證用)有設定時用它，否則 GitHub。
+    /// 正式版一律 GitHub。
     pub fn from_environment() -> Self {
-        match std::env::var(RELEASE_URL_VARIABLE) {
-            Ok(base) if !base.trim().is_empty() => HttpReleaseSource::at(&base),
-            _ => HttpReleaseSource::github(),
+        #[cfg(any(debug_assertions, feature = "release-url-override"))]
+        if let Ok(base) = std::env::var(RELEASE_URL_VARIABLE)
+            && !base.trim().is_empty()
+        {
+            return HttpReleaseSource::at(&base);
         }
+        HttpReleaseSource::github()
     }
 
     /// `raychiutw/purrdr.host` 的 GitHub Release。
@@ -287,9 +322,14 @@ impl HttpReleaseSource {
         }
     }
 
-    fn get(&self, url: &str) -> Result<Vec<u8>, UpdateError> {
+    /// `accept` 只給 API 呼叫;下載 Release 檔案不帶。
+    fn get(&self, url: &str, accept: Option<&str>) -> Result<Vec<u8>, UpdateError> {
         let network = |error: ureq::Error| UpdateError::Network(format!("{url}: {error}"));
-        let mut response = self.agent.get(url).header("Accept", "application/json").call().map_err(network)?;
+        let mut request = self.agent.get(url);
+        if let Some(accept) = accept {
+            request = request.header("Accept", accept);
+        }
+        let mut response = request.call().map_err(network)?;
         let mut body = Vec::new();
         response
             .body_mut()
@@ -316,14 +356,14 @@ struct LatestRelease {
 
 impl ReleaseSource for HttpReleaseSource {
     fn latest_version(&mut self) -> Result<Version, UpdateError> {
-        let body = self.get(&self.latest_url)?;
+        let body = self.get(&self.latest_url, Some("application/json"))?;
         let release: LatestRelease =
             serde_json::from_slice(&body).map_err(|error| UpdateError::Network(format!("{}: unexpected response: {error}", self.latest_url)))?;
         Version::from_tag(&release.tag_name).ok_or_else(|| UpdateError::Network(format!("unexpected release tag {}", release.tag_name)))
     }
 
     fn download(&mut self, version: &Version, file_name: &str) -> Result<Vec<u8>, UpdateError> {
-        self.get(&format!("{}/{}/{file_name}", self.download_url, version.tag()))
+        self.get(&format!("{}/{}/{file_name}", self.download_url, version.tag()), None)
     }
 }
 
@@ -346,6 +386,11 @@ pub struct Updater<R: ReleaseSource, L: InstallLocation> {
 impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
     pub fn new(source: R, location: L) -> Self {
         Updater { source, location }
+    }
+
+    /// 安裝位置(測試檢查假系統)。
+    pub fn location(&self) -> &L {
+        &self.location
     }
 
     fn record(&mut self, result: String) {
@@ -383,6 +428,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
         let outcome = match self.check().and_then(|check| Ok((check.update_available(), check.versions()?))) {
             Err(error) => AutomaticOutcome::Failed(error),
             Ok((false, (installed, _))) => AutomaticOutcome::UpToDate(installed),
+            Ok((true, (_, to))) if self.location.rolled_back_version() == Some(to) => AutomaticOutcome::Skipped(to),
             Ok((true, (from, to))) => match launcher.launch() {
                 Ok(()) => AutomaticOutcome::Started { from, to },
                 Err(message) => AutomaticOutcome::Failed(UpdateError::Io(format!("cannot start the update: {message}"))),
@@ -392,6 +438,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
             AutomaticOutcome::UpToDate(installed) => format!("up to date ({installed})"),
             AutomaticOutcome::Started { to, .. } => format!("update to {to} started"),
             AutomaticOutcome::Failed(error) => format!("check failed: {}", error.summary()),
+            AutomaticOutcome::Skipped(version) => format!("skipped {version}: it was rolled back before (run update to try again)"),
             AutomaticOutcome::Disabled => unreachable!("前面已回傳"),
         };
         self.record(result);
@@ -417,6 +464,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
         if !check.update_available() {
             return Ok(UpdateOutcome::UpToDate { installed, latest });
         }
+        let _lock = self.location.lock()?;
         let asset = release_asset_name(self.location.platform());
         let checksums = self.source.download(&latest, "SHA256SUMS")?;
         let archive = self.source.download(&latest, &asset)?;
@@ -432,6 +480,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
 
         if let Err(error) = self.location.restart(&latest) {
             let reason = error.summary();
+            self.location.set_rolled_back_version(Some(latest));
             return match self.location.restore().and_then(|()| self.location.restart(&installed)) {
                 Ok(()) => Err(UpdateError::RolledBack {
                     failed: latest,
@@ -444,26 +493,41 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
                 }),
             };
         }
+        self.location.discard_previous();
+        self.location.set_rolled_back_version(None);
         Ok(UpdateOutcome::Updated { from: installed, to: latest })
     }
 
-    /// 清空暫存資料夾後解開壓縮檔。
+    /// 解開壓縮檔到新的暫存資料夾;只接受一般檔案與資料夾(連結項目整個拒絕)。
     fn stage(&self, staging: &Path, archive: &[u8]) -> Result<(), UpdateError> {
-        match std::fs::remove_dir_all(staging) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(io_error(error)),
-            _ => {}
-        }
+        let extract_failed = |error: &dyn std::fmt::Display| io_error(format!("cannot extract the downloaded archive: {error}"));
         std::fs::create_dir_all(staging).map_err(io_error)?;
         if self.location.platform() == InstallPlatform::Windows {
-            zip::ZipArchive::new(std::io::Cursor::new(archive))
-                .and_then(|mut zip| zip.extract(staging))
-                .map_err(|error| io_error(format!("cannot extract the downloaded archive: {error}")))
+            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).map_err(|error| extract_failed(&error))?;
+            for index in 0..zip.len() {
+                let file = zip.by_index(index).map_err(|error| extract_failed(&error))?;
+                if file.is_symlink() {
+                    return Err(link_refused(&file.name().map(|name| name.into_owned()).unwrap_or_default()));
+                }
+            }
+            zip.extract(staging).map_err(|error| extract_failed(&error))
         } else {
-            tar::Archive::new(flate2::read::GzDecoder::new(archive))
-                .unpack(staging)
-                .map_err(|error| io_error(format!("cannot extract the downloaded archive: {error}")))
+            let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+            for entry in tar.entries().map_err(|error| extract_failed(&error))? {
+                let mut entry = entry.map_err(|error| extract_failed(&error))?;
+                let kind = entry.header().entry_type();
+                if !(kind.is_file() || kind.is_dir()) {
+                    return Err(link_refused(&entry.path().map(|path| path.display().to_string()).unwrap_or_default()));
+                }
+                entry.unpack_in(staging).map_err(|error| extract_failed(&error))?;
+            }
+            Ok(())
         }
     }
+}
+
+fn link_refused(name: &str) -> UpdateError {
+    UpdateError::Io(format!("the downloaded archive contains a link or special entry ({name}), so it was not used"))
 }
 
 /// `SHA256SUMS` 裡 `asset` 那一行要與壓縮檔相符。

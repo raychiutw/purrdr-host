@@ -37,6 +37,10 @@ tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3.27.0"
 tokio-tungstenite.workspace = true
 
+[features]
+# 正式版忽略 `PURRDR_HOST_SERVICE_RELEASE_URL`;debug 建置或開這個 feature 時才換 Release 來源(實機驗證用)。
+release-url-override = []
+
 [lints]
 workspace = true
 

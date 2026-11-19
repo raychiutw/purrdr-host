@@ -69,6 +69,38 @@ pub(super) fn register(system: &mut impl HostSystem, layout: &ServiceLayout, ser
     }
 }
 
+/// 就地重啟已登記的服務(不刪登記檔、不取消登記):macOS `kickstart -k`、Linux `systemctl --user restart`、
+/// Windows 結束背景程序後再啟動一次(Run 值不動)。
+pub(super) fn restart(system: &mut impl HostSystem, layout: &ServiceLayout, service_arguments: &[String], user_name: Option<&str>) -> Result<(), InstallError> {
+    match layout.platform {
+        InstallPlatform::MacOs => {
+            let domain = gui_domain(system)?;
+            run_checked(
+                system,
+                "launchctl",
+                &["kickstart".into(), "-k".into(), format!("{domain}/{LAUNCH_AGENT_LABEL}")],
+            )
+        }
+        InstallPlatform::Linux => run_checked(system, "systemctl", &arguments(&["--user", "restart", SYSTEMD_UNIT])),
+        InstallPlatform::Windows => {
+            stop_windows_background(system, layout, user_name);
+            let background = layout.background_executable().display().to_string();
+            system
+                .spawn_detached(&background, service_arguments)
+                .map_err(|error| InstallError::Autostart(format!("cannot start {background}: {error}")))
+        }
+    }
+}
+
+/// 只結束這個使用者的背景執行檔。
+fn stop_windows_background(system: &mut impl HostSystem, layout: &ServiceLayout, user_name: Option<&str>) {
+    let mut taskkill = arguments(&["/F", "/IM", layout.background_executable_name()]);
+    if let Some(user_name) = user_name {
+        taskkill.extend(["/FI".to_owned(), format!("USERNAME eq {user_name}")]);
+    }
+    let _ = system.run("taskkill", &taskkill);
+}
+
 /// 停止並取消登記，刪除登記檔;沒有登記時不算失敗。
 pub(super) fn unregister(system: &mut impl HostSystem, layout: &ServiceLayout, user_name: Option<&str>) -> Result<(), InstallError> {
     match layout.platform {
@@ -80,12 +112,7 @@ pub(super) fn unregister(system: &mut impl HostSystem, layout: &ServiceLayout, u
             let _ = system.run("systemctl", &arguments(&["--user", "disable", "--now", SYSTEMD_UNIT]));
         }
         InstallPlatform::Windows => {
-            let image = layout.background_executable_name();
-            let mut taskkill = arguments(&["/F", "/IM", image]);
-            if let Some(user_name) = user_name {
-                taskkill.extend(["/FI".to_owned(), format!("USERNAME eq {user_name}")]);
-            }
-            let _ = system.run("taskkill", &taskkill);
+            stop_windows_background(system, layout, user_name);
             let _ = system.run("reg", &arguments(&["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]));
         }
     }
