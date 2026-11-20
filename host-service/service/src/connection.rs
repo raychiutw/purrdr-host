@@ -418,7 +418,6 @@ impl ClientConnection {
                 name: stored.name,
                 read_only: stored.read_only,
                 paired_at: rfc3339(stored.paired_at),
-                last_connected_at: stored.last_connected_at.map(rfc3339),
             })
             .collect();
         ServerMessage::DevicesListResult(DevicesListResult {
@@ -429,6 +428,13 @@ impl ClientConnection {
 
     /// 撤銷指定裝置;它的下一個訊息由每則重新驗證拒絕(4401)。
     async fn devices_revoke(&self, request_id: String, device_id: String, requester: &Device) -> ServerMessage {
+        if device_id == requester.device_id {
+            return error(
+                Some(request_id),
+                ErrorCode::InvalidMessage,
+                "a device cannot revoke itself over the WebSocket; use POST /v1/revoke",
+            );
+        }
         let devices = self.devices.clone();
         let target_device_id = device_id.clone();
         match blocking(move || devices.revoke(&target_device_id, SystemTime::now())).await {

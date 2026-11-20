@@ -12,9 +12,13 @@ fn hello(request_id: &str) -> Value {
     json!({"type": "hello", "request_id": request_id, "protocol_version": 1})
 }
 
-/// herdr 0.9.5 在 Windows 主機錄的回應。
-fn windows_recorded(name: &str) -> Value {
-    recorded(&format!("windows/{name}"))
+/// herdr 0.9.5 在這個平台錄的回應:Windows 回放 Windows 主機的，Unix 回放 Linux(WSL)的 POSIX 路徑版。
+fn platform_recorded(name: &str) -> Value {
+    if cfg!(windows) {
+        recorded(&format!("windows/{name}"))
+    } else {
+        recorded(name)
+    }
 }
 
 async fn herdr_with(replies: Vec<(&str, Value)>) -> FakeHerdr {
@@ -38,7 +42,7 @@ fn path_text(directory: &TempDir) -> String {
 
 #[tokio::test]
 async fn workspace_create_is_forwarded_without_focus_and_returns_its_root_pane() {
-    let herdr = herdr_with(vec![("workspace.create", windows_recorded("workspace.create.ndjson"))]).await;
+    let herdr = herdr_with(vec![("workspace.create", platform_recorded("workspace.create.ndjson"))]).await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
@@ -92,7 +96,7 @@ async fn workspace_create_rejects_blank_labels() {
 
 #[tokio::test]
 async fn workspace_rename_is_forwarded_and_returns_the_label_herdr_kept() {
-    let herdr = herdr_with(vec![("workspace.rename", windows_recorded("workspace.rename.ndjson"))]).await;
+    let herdr = herdr_with(vec![("workspace.rename", platform_recorded("workspace.rename.ndjson"))]).await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
@@ -118,7 +122,7 @@ async fn workspace_rename_rejects_unsafe_ids_and_blank_labels() {
 
 #[tokio::test]
 async fn workspace_rename_of_missing_workspace_keeps_herdr_error_code() {
-    let herdr = herdr_with(vec![("workspace.rename", windows_recorded("error.workspace-rename-not-found.ndjson"))]).await;
+    let herdr = herdr_with(vec![("workspace.rename", platform_recorded("error.workspace-rename-not-found.ndjson"))]).await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
@@ -133,7 +137,7 @@ async fn workspace_rename_of_missing_workspace_keeps_herdr_error_code() {
 
 #[tokio::test]
 async fn workspace_close_is_forwarded_without_closing_the_worktree_group() {
-    let herdr = herdr_with(vec![("workspace.close", windows_recorded("workspace.close.ndjson"))]).await;
+    let herdr = herdr_with(vec![("workspace.close", platform_recorded("workspace.close.ndjson"))]).await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
@@ -148,7 +152,7 @@ async fn workspace_close_is_forwarded_without_closing_the_worktree_group() {
 
 #[tokio::test]
 async fn workspace_close_with_open_worktrees_keeps_herdr_error_code() {
-    let herdr = herdr_with(vec![("workspace.close", windows_recorded("error.workspace-close-group-required.ndjson"))]).await;
+    let herdr = herdr_with(vec![("workspace.close", platform_recorded("error.workspace-close-group-required.ndjson"))]).await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
@@ -174,7 +178,7 @@ async fn workspace_close_rejects_unsafe_ids() {
 
 #[tokio::test]
 async fn worktree_create_is_forwarded_without_focus_and_returns_the_new_workspace() {
-    let herdr = herdr_with(vec![("worktree.create", windows_recorded("worktree.create.ndjson"))]).await;
+    let herdr = herdr_with(vec![("worktree.create", platform_recorded("worktree.create.ndjson"))]).await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
@@ -240,7 +244,7 @@ fn agent_start(request_id: &str) -> Value {
 
 #[tokio::test]
 async fn agent_start_is_forwarded_with_the_claude_permission_mode_as_arguments() {
-    let herdr = herdr_with(vec![("agent.start", windows_recorded("agent.start.ndjson"))]).await;
+    let herdr = herdr_with(vec![("agent.start", platform_recorded("agent.start.ndjson"))]).await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
@@ -262,7 +266,7 @@ async fn agent_start_is_forwarded_with_the_claude_permission_mode_as_arguments()
 
 #[tokio::test]
 async fn agent_start_without_options_leaves_them_to_herdr() {
-    let herdr = herdr_with(vec![("agent.start", windows_recorded("agent.start.ndjson"))]).await;
+    let herdr = herdr_with(vec![("agent.start", platform_recorded("agent.start.ndjson"))]).await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
@@ -303,7 +307,7 @@ async fn agent_start_rejects_unsafe_values_and_permission_modes_for_other_agents
 
 #[tokio::test]
 async fn agent_start_on_a_busy_pane_keeps_herdr_error_code() {
-    let herdr = herdr_with(vec![("agent.start", windows_recorded("error.agent-start-pane-busy.ndjson"))]).await;
+    let herdr = herdr_with(vec![("agent.start", platform_recorded("error.agent-start-pane-busy.ndjson"))]).await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
@@ -318,7 +322,7 @@ async fn agent_start_on_a_busy_pane_keeps_herdr_error_code() {
 async fn agent_start_waits_for_herdr_longer_than_a_plain_request() {
     let herdr = FakeHerdr::start_delayed(vec![
         ("ping", recorded("ping.ndjson"), Duration::ZERO),
-        ("agent.start", windows_recorded("agent.start.ndjson"), Duration::from_secs(11)),
+        ("agent.start", platform_recorded("agent.start.ndjson"), Duration::from_secs(11)),
     ])
     .await;
     let service = start_service(herdr.socket.clone()).await;

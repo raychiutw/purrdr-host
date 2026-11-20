@@ -557,13 +557,13 @@ pub struct TranscriptPreviewsResult {
     pub previews: Vec<TranscriptPreview>,
 }
 
-/// 一個對話紀錄的預覽。lines 是剝除圖片後的行(同 SSH 預覽腳本，不帶原始長度):whole 是最後 48000 bytes(第一行可能被切在中間)、appended 是 known_version 之後附加的部分、unchanged 沒有內容。
+/// 一個對話紀錄的預覽。records 同其他對話紀錄讀取，每行是原始長度與剝除圖片後的內容:whole 是最後 48000 bytes(第一行可能被切在中間，長度從切點算起)、appended 是 known_version 之後附加的部分、unchanged 沒有內容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptPreview {
     pub key: String,
     pub change: TranscriptPreviewChange,
     pub version: String,
-    pub lines: Vec<String>,
+    pub records: Vec<TranscriptRecord>,
 }
 
 /// 這次讀到的範圍:unchanged 與 known_version 相同、appended 只有附加的部分、whole 整段檔尾。
@@ -1061,14 +1061,11 @@ pub struct PairedDevice {
     pub name: String,
     pub read_only: bool,
     pub paired_at: String,
-    /// 最後一次 WSS 連線的時間;還沒連過就沒有這欄。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_connected_at: Option<String>,
     /// 是發出這個請求的裝置。
     pub current: bool,
 }
 
-/// 撤銷一支已配對的裝置：之後它的每個 WSS 訊息都以 device_token_revoked 與 close code 4401 拒絕。已撤銷的再撤銷一次也成功;不認得的 device_id 回 device_unknown。
+/// 撤銷一支已配對的裝置：之後它的每個 WSS 訊息都以 device_token_revoked 與 close code 4401 拒絕。已撤銷的再撤銷一次也成功;不認得的 device_id 回 device_unknown;不能撤銷發出請求的這支裝置(回 invalid_message,撤銷自己用 POST /v1/revoke)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DevicesRevoke {
     pub request_id: String,

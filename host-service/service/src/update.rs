@@ -263,6 +263,8 @@ pub enum AutomaticOutcome {
         from: Version,
         to: Version,
     },
+    /// 已有更新在進行或剛被手動啟動，這次略過(不算延後)。
+    InProgress,
     Failed(UpdateError),
 }
 
@@ -557,7 +559,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
         Ok(UpdateLaunch::Started { from: installed, to: latest })
     }
 
-    /// 背景自動檢查：開啟且有新版時啟動更新程序(由它套用);結果都記下來。
+    /// 背景自動檢查：開啟且有新版時占位並啟動更新程序(由它套用);結果都記下來。
     pub fn automatic(&mut self, launcher: &mut impl UpdateLauncher, agents: &mut impl AgentActivity) -> AutomaticOutcome {
         match self.location.auto_update() {
             Ok(true) => {}
@@ -576,13 +578,20 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
                 self.location.set_deferred_updates(deferred);
                 AutomaticOutcome::Deferred { to, deferred }
             }
-            Ok((true, (from, to))) => {
-                self.location.set_deferred_updates(0);
-                match launcher.launch() {
-                    Ok(()) => AutomaticOutcome::Started { from, to },
-                    Err(message) => AutomaticOutcome::Failed(launch_failed(message)),
+            Ok((true, (from, to))) => match self.location.reserve_launch() {
+                Err(UpdateError::InProgress) => AutomaticOutcome::InProgress,
+                Err(reservation_error) => AutomaticOutcome::Failed(reservation_error),
+                Ok(()) => {
+                    self.location.set_deferred_updates(0);
+                    match launcher.launch() {
+                        Ok(()) => AutomaticOutcome::Started { from, to },
+                        Err(message) => {
+                            self.location.release_launch();
+                            AutomaticOutcome::Failed(launch_failed(message))
+                        }
+                    }
                 }
-            }
+            },
         };
         let result = match &outcome {
             AutomaticOutcome::UpToDate(installed) => format!("up to date ({installed})"),
@@ -590,6 +599,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
             AutomaticOutcome::Failed(error) => format!("check failed: {}", error.summary()),
             AutomaticOutcome::Skipped(version) => format!("skipped {version}: it was rolled back before (run update to try again)"),
             AutomaticOutcome::Deferred { to, deferred } => format!("deferred update to {to}: an agent is working ({deferred} in a row)"),
+            AutomaticOutcome::InProgress => "skipped: another update is in progress".to_owned(),
             AutomaticOutcome::Disabled => unreachable!("前面已回傳"),
         };
         self.record(result);

@@ -584,6 +584,36 @@ fn successful_manual_update_clears_the_deferral_count() {
     assert!(status.get("deferred_count").is_none(), "手動更新成功後歸零：{status}");
 }
 
+#[test]
+fn automatic_update_skips_without_counting_a_deferral_while_a_manual_update_holds_the_reservation() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "");
+    let mut manual_update = installed.another_location();
+    let mut updater = installed.updater(&server);
+    let mut launcher = FakeLauncher::default();
+    assert!(matches!(
+        updater.automatic(&mut launcher, &mut FakeAgents::working()),
+        AutomaticOutcome::Deferred { deferred: 1, .. }
+    ));
+    manual_update.reserve_launch().unwrap();
+
+    let while_reserved = updater.automatic(&mut launcher, &mut FakeAgents::idle());
+    let status_while_reserved = update_status(&installed);
+    manual_update.release_launch();
+    let after_release = updater.automatic(&mut launcher, &mut FakeAgents::idle());
+
+    assert_eq!(while_reserved, AutomaticOutcome::InProgress);
+    assert_eq!(status_while_reserved["deferred_count"], 1, "略過不算延後：{status_while_reserved}");
+    assert!(matches!(after_release, AutomaticOutcome::Started { .. }), "{after_release:?}");
+    assert_eq!(launcher.launches, 1);
+    assert_eq!(
+        manual_update.reserve_launch(),
+        Err(UpdateError::InProgress),
+        "自動更新啟動的更新程序也占位，同時按立即更新會被擋"
+    );
+}
+
 /// 以 herdr 的 `session.snapshot` 判斷 Agent 狀態，跑一次自動檢查(`snapshot` 為 None 時 herdr 沒在跑)。
 fn automatic_check_with_herdr(snapshot: Option<serde_json::Value>) -> (AutomaticOutcome, usize) {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();

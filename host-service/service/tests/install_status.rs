@@ -3,17 +3,12 @@
 mod install_support;
 mod support;
 
-use install_support::{FQDN, FakeSystem, TestHost};
+use install_support::{FQDN, FakeSystem, TestHost, reserved_port};
 use purrdr_host_service::herdr_socket::SocketEnvironment;
 use purrdr_host_service::install::{HerdrStatus, InstallPlatform, Installer, ServeStatus};
 use support::{FakeHerdr, recorded};
 
 const PLATFORMS: [InstallPlatform; 3] = [InstallPlatform::MacOs, InstallPlatform::Linux, InstallPlatform::Windows];
-
-/// 一個目前沒有人在聽的 127.0.0.1 埠。
-fn unused_port() -> u16 {
-    std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
-}
 
 fn socket_environment_at(path: &str) -> SocketEnvironment {
     SocketEnvironment {
@@ -39,7 +34,7 @@ async fn status_before_install_reports_nothing_installed() {
 async fn status_after_install_reports_autostart_and_serve_on_every_platform() {
     for platform in PLATFORMS {
         let host = TestHost::new(platform);
-        let port = unused_port();
+        let port = reserved_port();
         let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
         installer.install(&host.options(port), |_| true).unwrap();
 
@@ -77,7 +72,7 @@ async fn status_reports_running_service_and_herdr() {
 async fn status_flags_serve_pointing_somewhere_else() {
     let host = TestHost::new(InstallPlatform::Linux);
     let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
-    installer.install(&host.options(unused_port()), |_| true).unwrap();
+    installer.install(&host.options(reserved_port()), |_| true).unwrap();
     let mut system = FakeSystem::ready(&host.home.0);
     system
         .state
@@ -93,7 +88,7 @@ async fn status_flags_serve_pointing_somewhere_else() {
 #[tokio::test]
 async fn status_reports_the_https_port_in_use() {
     let host = TestHost::new(InstallPlatform::Linux);
-    let port = unused_port();
+    let port = reserved_port();
     let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
     installer.install(&host.options_on_https_port(port, 8443), |_| true).unwrap();
 

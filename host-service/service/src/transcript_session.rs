@@ -182,7 +182,7 @@ impl TranscriptSession {
                         key: entry.key,
                         change: preview.change,
                         version: preview.version,
-                        lines: preview.lines,
+                        records: protocol_records(preview.records),
                     })
                 })
                 .collect()

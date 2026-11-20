@@ -23,7 +23,7 @@ pub struct Preview {
     pub change: TranscriptPreviewChange,
     /// `<修改時間>-<大小> <錨點>`,app 原樣帶回。
     pub version: String,
-    pub lines: Vec<String>,
+    pub records: Vec<Record>,
 }
 
 /// 讀預覽：與 `known_version` 相同回 unchanged;只是附加了不超過 48000 bytes 的完整行時只回附加部分;否則回檔尾。
@@ -41,7 +41,7 @@ pub fn preview(path: &Path, known_version: Option<&str>) -> Result<Preview, Tran
         return Ok(Preview {
             change: TranscriptPreviewChange::Unchanged,
             version,
-            lines: Vec::new(),
+            records: Vec::new(),
         });
     }
     let known_size = match known_version {
@@ -56,7 +56,7 @@ pub fn preview(path: &Path, known_version: Option<&str>) -> Result<Preview, Tran
     Ok(Preview {
         change,
         version,
-        lines: stripped_lines(&content),
+        records: stripped_records(&content),
     })
 }
 
@@ -84,12 +84,15 @@ fn anchor(file: &mut File, end: u64) -> Result<String, TranscriptFailure> {
     Ok(hex(&Sha256::digest(&bytes)[..8]))
 }
 
-/// 依換行切開、剝除圖片;空行略過(同 app 解析 SSH 輸出)。
-fn stripped_lines(content: &[u8]) -> Vec<String> {
+/// 依換行切開，每行記原始長度並剝除圖片;空行略過(同 app 解析 SSH 輸出)。
+fn stripped_records(content: &[u8]) -> Vec<Record> {
     content
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-        .map(|line| String::from_utf8_lossy(&strip_images(line)).into_owned())
+        .map(|line| Record {
+            length: line.len() as u64,
+            text: String::from_utf8_lossy(&strip_images(line)).into_owned(),
+        })
         .collect()
 }
 

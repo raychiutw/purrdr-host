@@ -44,7 +44,7 @@ async fn devices_list_reports_paired_devices_and_marks_the_requesting_one() {
         listed_tablet["paired_at"].as_str().unwrap().ends_with('Z'),
         "paired_at 是 RFC 3339 UTC:{listed_tablet}"
     );
-    assert!(listed_tablet["last_connected_at"].is_string());
+    assert!(listed_tablet.get("last_connected_at").is_none(), "spec 沒要求最後連線時間：{listed_tablet}");
     assert_eq!(reply["devices"].as_array().unwrap().len(), 2, "預先配對的裝置也列出:{reply}");
     let others: Vec<&Value> = reply["devices"]
         .as_array()
@@ -149,6 +149,23 @@ async fn revoking_from_the_app_is_audited_without_tokens() {
     assert_eq!(revoked_line["by_device_id"], requester_id.as_str());
     assert!(!audit_log.contains(&lost_phone.device_token));
     assert!(!audit_log.contains(&service.device_token));
+}
+
+#[tokio::test]
+async fn a_device_cannot_revoke_itself_over_the_websocket() {
+    let herdr = herdr().await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = connected(&service, &service.device_token).await;
+    let own_device_id = service.store().authenticate(&service.device_token).unwrap().device_id;
+
+    let reply = client
+        .request(json!({"type": "devices.revoke", "request_id": "r2", "device_id": own_device_id}))
+        .await;
+
+    assert_eq!(reply["code"], "invalid_message", "{reply}");
+    assert_eq!(reply["request_id"], "r2");
+    assert!(reply["message"].as_str().unwrap().contains("POST /v1/revoke"), "{reply}");
+    assert!(service.store().authenticate(&service.device_token).is_ok(), "自己沒有被撤銷");
 }
 
 #[tokio::test]
