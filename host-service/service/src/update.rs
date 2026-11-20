@@ -498,7 +498,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
             AutomaticOutcome::Disabled => unreachable!("前面已回傳"),
         };
         self.record(result);
-        if let AutomaticOutcome::Started { to, .. } = &outcome {
+        if let AutomaticOutcome::Started { to, .. } | AutomaticOutcome::Deferred { to, .. } = &outcome {
             self.location.notify(&UpdateEvent::Available(*to));
         }
         outcome

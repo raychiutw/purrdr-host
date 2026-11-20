@@ -10,7 +10,7 @@ use install_support::push_backend::FakePushBackend;
 use install_support::release::FakeReleaseServer;
 use install_support::{FakeSystem, TestHost, executable_names, fake_host_service, snapshot};
 use purrdr_host_service::install::{InstallPlatform, InstalledService, Installer};
-use purrdr_host_service::update::{AutomaticOutcome, HttpReleaseSource, UpdateError, UpdateLauncher, UpdateOutcome, Updater};
+use purrdr_host_service::update::{AgentActivity, AutomaticOutcome, HttpReleaseSource, UpdateError, UpdateLauncher, UpdateOutcome, Updater};
 use serde_json::json;
 
 const INSTALLED: &str = "0.5.0";
@@ -70,6 +70,17 @@ impl UpdateLauncher for FakeLauncher {
     fn launch(&mut self) -> Result<(), String> {
         self.launches += 1;
         Ok(())
+    }
+}
+
+/// 固定回報有沒有 `working` Agent。
+struct FakeAgents {
+    working: bool,
+}
+
+impl AgentActivity for FakeAgents {
+    fn has_working_agent(&mut self) -> bool {
+        self.working
     }
 }
 
@@ -136,10 +147,29 @@ fn automatic_check_that_finds_a_newer_release_sends_update_available_event() {
     publish(&server, InstallPlatform::MacOs, "0.5.1", "");
     let mut launcher = FakeLauncher::default();
 
-    let outcome = installed.updater(&server).automatic(&mut launcher);
+    let outcome = installed.updater(&server).automatic(&mut launcher, &mut FakeAgents { working: false });
 
     assert!(matches!(outcome, AutomaticOutcome::Started { .. }), "{outcome:?}");
     assert_eq!(launcher.launches, 1);
+    assert_eq!(
+        backend.bodies(),
+        vec![json!({"key": PHONE_KEY, "event": "host_service_update_available", "version": "0.5.1"})]
+    );
+}
+
+#[test]
+fn automatic_update_deferred_because_an_agent_is_working_still_sends_update_available_event() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let backend = FakePushBackend::start();
+    installed.pair_device("phone", &backend.endpoint(), PHONE_KEY);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "");
+    let mut launcher = FakeLauncher::default();
+
+    let outcome = installed.updater(&server).automatic(&mut launcher, &mut FakeAgents { working: true });
+
+    assert!(matches!(outcome, AutomaticOutcome::Deferred { .. }), "{outcome:?}");
+    assert_eq!(launcher.launches, 0);
     assert_eq!(
         backend.bodies(),
         vec![json!({"key": PHONE_KEY, "event": "host_service_update_available", "version": "0.5.1"})]
@@ -156,10 +186,10 @@ fn the_same_event_and_version_is_sent_only_once_but_a_newer_version_is_sent_agai
     let mut updater = installed.updater(&server);
     let mut launcher = FakeLauncher::default();
 
-    updater.automatic(&mut launcher);
-    updater.automatic(&mut launcher);
+    updater.automatic(&mut launcher, &mut FakeAgents { working: false });
+    updater.automatic(&mut launcher, &mut FakeAgents { working: false });
     publish(&server, InstallPlatform::Linux, "0.5.2", "");
-    updater.automatic(&mut launcher);
+    updater.automatic(&mut launcher, &mut FakeAgents { working: false });
 
     assert_eq!(launcher.launches, 3);
     assert_eq!(
@@ -201,9 +231,9 @@ fn unreachable_backend_does_not_change_the_update_result_and_is_retried_on_the_n
     let mut updater = installed.updater(&server);
     let mut launcher = FakeLauncher::default();
 
-    let while_unreachable = updater.automatic(&mut launcher);
+    let while_unreachable = updater.automatic(&mut launcher, &mut FakeAgents { working: false });
     installed.pair_device("phone", &backend.endpoint(), PHONE_KEY);
-    updater.automatic(&mut launcher);
+    updater.automatic(&mut launcher, &mut FakeAgents { working: false });
 
     assert!(matches!(while_unreachable, AutomaticOutcome::Started { .. }), "{while_unreachable:?}");
     assert_eq!(
@@ -225,7 +255,7 @@ fn pairing_key_appears_in_no_command_argument_and_no_file_other_than_the_pairing
     let mut updater = installed.updater(&server);
 
     let _ = updater.apply();
-    updater.automatic(&mut FakeLauncher::default());
+    updater.automatic(&mut FakeLauncher::default(), &mut FakeAgents { working: false });
 
     assert_eq!(backend.bodies().len(), 1, "{:?}", backend.bodies());
     let commands = &updater.location().system().commands;
@@ -246,7 +276,9 @@ fn automatic_check_that_finds_nothing_new_sends_nothing() {
     let server = FakeReleaseServer::start();
     publish(&server, InstallPlatform::Windows, INSTALLED, "");
 
-    let outcome = installed.updater(&server).automatic(&mut FakeLauncher::default());
+    let outcome = installed
+        .updater(&server)
+        .automatic(&mut FakeLauncher::default(), &mut FakeAgents { working: false });
 
     assert!(matches!(outcome, AutomaticOutcome::UpToDate(_)), "{outcome:?}");
     assert_eq!(backend.bodies(), Vec::<serde_json::Value>::new());
