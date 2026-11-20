@@ -23,6 +23,7 @@ pub mod protocol;
 pub mod running_service;
 pub mod state_directory;
 pub mod transcript;
+mod transcript_reads;
 mod transcript_session;
 pub mod update;
 

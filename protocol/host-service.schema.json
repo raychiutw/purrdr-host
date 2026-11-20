@@ -33,6 +33,10 @@
         { "$ref": "#/$defs/TranscriptWindow" },
         { "$ref": "#/$defs/TranscriptFollow" },
         { "$ref": "#/$defs/TranscriptUnfollow" },
+        { "$ref": "#/$defs/TranscriptPreviews" },
+        { "$ref": "#/$defs/TranscriptSubagent" },
+        { "$ref": "#/$defs/TranscriptWorkflow" },
+        { "$ref": "#/$defs/TranscriptDelegation" },
         { "$ref": "#/$defs/PaneSendText" },
         { "$ref": "#/$defs/AgentPrompt" },
         { "$ref": "#/$defs/EventsSubscribe" },
@@ -61,6 +65,10 @@
         { "$ref": "#/$defs/TranscriptFollowResult" },
         { "$ref": "#/$defs/TranscriptUpdate" },
         { "$ref": "#/$defs/TranscriptUnfollowResult" },
+        { "$ref": "#/$defs/TranscriptPreviewsResult" },
+        { "$ref": "#/$defs/TranscriptSubagentResult" },
+        { "$ref": "#/$defs/TranscriptWorkflowResult" },
+        { "$ref": "#/$defs/TranscriptDelegationResult" },
         { "$ref": "#/$defs/PaneSendTextResult" },
         { "$ref": "#/$defs/AgentPromptResult" },
         { "$ref": "#/$defs/EventsSubscribeResult" },
@@ -439,6 +447,126 @@
       },
       "required": ["type", "request_id"]
     },
+    "TranscriptPreviews": {
+      "description": "列表預覽(raychiutw/purrdr.host#17):一次讀多個對話紀錄的檔尾。path 必須是這條連線定位過的，任一個不是就整個請求回 transcript_not_allowed。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "transcript.previews" },
+        "request_id": { "type": "string" },
+        "entries": { "type": "array", "items": { "$ref": "#/$defs/TranscriptPreviewEntry" } }
+      },
+      "required": ["type", "request_id", "entries"]
+    },
+    "TranscriptPreviewEntry": {
+      "description": "一個要讀預覽的對話紀錄。known_version 是上次這個主機服務回的 version(app 原樣帶回，不解讀)。",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string" },
+        "path": { "type": "string" },
+        "known_version": { "type": "string" }
+      },
+      "required": ["key", "path"]
+    },
+    "TranscriptPreviewsResult": {
+      "description": "每個讀得到的對話紀錄一項(讀不到的不在結果裡，同 SSH 的預覽腳本)。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "transcript.previews.result" },
+        "request_id": { "type": "string" },
+        "previews": { "type": "array", "items": { "$ref": "#/$defs/TranscriptPreview" } }
+      },
+      "required": ["type", "request_id", "previews"]
+    },
+    "TranscriptPreview": {
+      "description": "一個對話紀錄的預覽。lines 是剝除圖片後的行(同 SSH 預覽腳本，不帶原始長度):whole 是最後 48000 bytes(第一行可能被切在中間)、appended 是 known_version 之後附加的部分、unchanged 沒有內容。",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string" },
+        "change": { "$ref": "#/$defs/TranscriptPreviewChange" },
+        "version": { "type": "string" },
+        "lines": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["key", "change", "version", "lines"]
+    },
+    "TranscriptPreviewChange": {
+      "description": "這次讀到的範圍:unchanged 與 known_version 相同、appended 只有附加的部分、whole 整段檔尾。",
+      "type": "string",
+      "enum": ["unchanged", "appended", "whole"]
+    },
+    "TranscriptSubagent": {
+      "description": "找呼叫 call_id 啟動的 subagent 對話紀錄(raychiutw/purrdr.host#17):在 path 的 session 資料夾的 subagents/ 下找 toolUseId 完全等於 call_id 的 agent-*.meta.json。path 必須是這條連線可讀的對話紀錄。沒有 meta 回 transcript_absent,不只一個回 transcript_ambiguous。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "transcript.subagent" },
+        "request_id": { "type": "string" },
+        "path": { "type": "string" },
+        "call_id": { "type": "string" }
+      },
+      "required": ["type", "request_id", "path", "call_id"]
+    },
+    "TranscriptSubagentResult": {
+      "description": "subagent 對話紀錄的路徑。session 資料夾 subagents/ 底下的 .jsonl 都可以讀視窗與追蹤。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "transcript.subagent.result" },
+        "request_id": { "type": "string" },
+        "path": { "type": "string" }
+      },
+      "required": ["type", "request_id", "path"]
+    },
+    "TranscriptWorkflow": {
+      "description": "讀 workflow 進度(raychiutw/purrdr.host#17):path 的 session 資料夾的 workflows/<run_id>.json(結束才寫)優先，否則 subagents/workflows/<run_id>/journal.jsonl。兩個都沒有回 transcript_absent。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "transcript.workflow" },
+        "request_id": { "type": "string" },
+        "path": { "type": "string" },
+        "run_id": { "type": "string" },
+        "known_checksum": { "type": "string", "description": "上次回的 checksum;相同時不回內容。" }
+      },
+      "required": ["type", "request_id", "path", "run_id"]
+    },
+    "TranscriptWorkflowResult": {
+      "description": "kind 是讀到哪個檔(run 或 journal);content 是檔案原樣內容，checksum 等於 known_checksum 時省略。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "transcript.workflow.result" },
+        "request_id": { "type": "string" },
+        "kind": { "$ref": "#/$defs/TranscriptWorkflowKind" },
+        "checksum": { "type": "string" },
+        "content": { "type": "string" }
+      },
+      "required": ["type", "request_id", "kind", "checksum"]
+    },
+    "TranscriptWorkflowKind": {
+      "description": "run:workflows/<run_id>.json;journal:subagents/workflows/<run_id>/journal.jsonl。",
+      "type": "string",
+      "enum": ["run", "journal"]
+    },
+    "TranscriptDelegation": {
+      "description": "父對話紀錄中含 call_id 或 agent_id 的行(委派是否結束，raychiutw/purrdr.host#17)。path 必須是這條連線可讀的對話紀錄。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "transcript.delegation" },
+        "request_id": { "type": "string" },
+        "path": { "type": "string" },
+        "call_id": { "type": "string" },
+        "agent_id": { "type": "string" },
+        "known_checksum": { "type": "string", "description": "上次回的 checksum;相同時不回內容。" }
+      },
+      "required": ["type", "request_id", "path", "call_id"]
+    },
+    "TranscriptDelegationResult": {
+      "description": "這些行(剝除圖片後)的 checksum 與行;checksum 等於 known_checksum 時省略 records。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "transcript.delegation.result" },
+        "request_id": { "type": "string" },
+        "checksum": { "type": "string" },
+        "records": { "type": "array", "items": { "$ref": "#/$defs/TranscriptRecord" } }
+      },
+      "required": ["type", "request_id", "checksum"]
+    },
     "PaneSendText": {
       "description": "對 Pane 送出文字(herdr pane.send_text),不補 Enter。",
       "type": "object",
@@ -757,7 +885,7 @@
       "required": ["type", "code", "message"]
     },
     "ErrorCode": {
-      "description": "錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。",
+      "description": "錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。",
       "type": "string",
       "enum": [
         "invalid_message",
