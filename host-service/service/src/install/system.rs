@@ -21,6 +21,10 @@ pub trait HostSystem {
     fn spawn_detached(&mut self, program: &str, arguments: &[String]) -> std::io::Result<()>;
     /// 這個行程結束後刪除資料夾，再刪除仍是空的 `empty_directories`(Windows 不能刪除執行中的執行檔)。
     fn remove_directory_after_exit(&mut self, directory: &Path, empty_directories: &[PathBuf]) -> std::io::Result<()>;
+    /// Windows 使用者層級 PATH(`HKCU\Environment` 的 `Path`,不展開 `%…%` 的原始值);沒有這個值時 None。
+    fn user_path(&mut self) -> std::io::Result<Option<String>>;
+    /// 寫入 Windows 使用者層級 PATH(None 刪除這個值),並通知其他程式環境變數已變更。
+    fn set_user_path(&mut self, value: Option<&str>) -> std::io::Result<()>;
 }
 
 /// 真正執行程式的系統。這是主機服務裡唯一會執行子行程的地方(`no_command_execution` 測試把關)，
@@ -116,6 +120,32 @@ impl HostSystem for ProcessHostSystem {
             .map(drop)
     }
 
+    #[cfg(windows)]
+    fn user_path(&mut self) -> std::io::Result<Option<String>> {
+        windows_environment::user_path(windows_environment::USER_ENVIRONMENT_KEY)
+    }
+
+    #[cfg(windows)]
+    fn set_user_path(&mut self, value: Option<&str>) -> std::io::Result<()> {
+        windows_environment::set_user_path(windows_environment::USER_ENVIRONMENT_KEY, value)
+    }
+
+    #[cfg(not(windows))]
+    fn user_path(&mut self) -> std::io::Result<Option<String>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the user PATH in the registry is Windows only",
+        ))
+    }
+
+    #[cfg(not(windows))]
+    fn set_user_path(&mut self, _value: Option<&str>) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the user PATH in the registry is Windows only",
+        ))
+    }
+
     /// Unix 可以刪除執行中的執行檔，直接刪。
     #[cfg(not(windows))]
     fn remove_directory_after_exit(&mut self, directory: &Path, empty_directories: &[PathBuf]) -> std::io::Result<()> {
@@ -124,5 +154,84 @@ impl HostSystem for ProcessHostSystem {
             let _ = std::fs::remove_dir(empty);
         }
         Ok(())
+    }
+}
+
+/// Windows 使用者環境變數的登錄(`HKCU\<subkey>` 的 `Path`),以 PowerShell 讀寫;`subkey` 讓測試改用暫存機碼。
+#[cfg(windows)]
+pub mod windows_environment {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    /// 使用者環境變數所在的機碼(`HKCU\Environment`)。
+    pub const USER_ENVIRONMENT_KEY: &str = "Environment";
+
+    /// 讀 `Path` 不展開 `%…%`(寫回時才不會把變數寫死);以 UTF-8 base64 輸出，不受 console 字碼頁影響。
+    const READ: &str = r#"$ErrorActionPreference = 'Stop'
+$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($env:PURRDR_REGISTRY_KEY)
+if ($null -eq $key) { exit 3 }
+$value = $key.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+if ($null -eq $value) { exit 3 }
+[Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$value)))
+"#;
+
+    /// 以 REG_EXPAND_SZ 寫入(或刪除)`Path`;再以 .NET 刪一個不存在的使用者變數，讓它廣播 WM_SETTINGCHANGE。
+    const WRITE: &str = r#"$ErrorActionPreference = 'Stop'
+$key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($env:PURRDR_REGISTRY_KEY)
+if ($env:PURRDR_USER_PATH) {
+    $key.SetValue('Path', $env:PURRDR_USER_PATH, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+} else {
+    $key.DeleteValue('Path', $false)
+}
+$key.Close()
+[Environment]::SetEnvironmentVariable('PURRDR_HOST_SERVICE_ENVIRONMENT_REFRESH', $null, 'User')
+"#;
+
+    /// `HKCU\<subkey>` 的 `Path` 原始值;沒有時 None。
+    pub fn user_path(subkey: &str) -> std::io::Result<Option<String>> {
+        let output = powershell(READ, subkey, None)?;
+        if output.status.code() == Some(3) {
+            return Ok(None);
+        }
+        check(&output)?;
+        let encoded = String::from_utf8_lossy(&output.stdout);
+        let bytes = STANDARD.decode(encoded.trim()).map_err(std::io::Error::other)?;
+        String::from_utf8(bytes).map(Some).map_err(std::io::Error::other)
+    }
+
+    /// 寫入(None 刪除)`HKCU\<subkey>` 的 `Path`,並通知其他程式環境變數已變更。
+    pub fn set_user_path(subkey: &str, value: Option<&str>) -> std::io::Result<()> {
+        check(&powershell(WRITE, subkey, Some(value.unwrap_or_default()))?)
+    }
+
+    /// 值經環境變數傳入(Unicode,不經命令列引號);腳本以 `-EncodedCommand`(UTF-16LE base64)傳入。
+    fn powershell(script: &str, subkey: &str, value: Option<&str>) -> std::io::Result<std::process::Output> {
+        let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut command = Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand"])
+            .arg(STANDARD.encode(utf16))
+            .env("PURRDR_REGISTRY_KEY", subkey)
+            .stdin(Stdio::null())
+            .creation_flags(super::windows_flags::CREATE_NO_WINDOW);
+        if let Some(value) = value {
+            command.env("PURRDR_USER_PATH", value);
+        }
+        command.output()
+    }
+
+    fn check(output: &std::process::Output) -> std::io::Result<()> {
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "powershell failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
     }
 }

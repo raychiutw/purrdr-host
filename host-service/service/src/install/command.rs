@@ -42,12 +42,14 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
             https_port,
             assume_yes,
             no_auto_update,
+            no_path,
         } => {
             let options = InstallOptions {
                 port,
                 herdr_session,
                 https_port,
                 auto_update: no_auto_update.then_some(false),
+                add_to_path: no_path.then_some(false),
                 source_directory,
             };
             let confirm = |question: &InstallQuestion| {
