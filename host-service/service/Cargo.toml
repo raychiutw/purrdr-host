@@ -34,6 +34,10 @@ zip = { version = "9.7.3", default-features = false, features = ["deflate-flate2
 # 主機取檔開檔的 O_NOFOLLOW、O_NONBLOCK。
 libc = "0.2.191"
 
+[target.'cfg(windows)'.dependencies]
+# 背景啟動程式前把自己的標準 handle 設成不可繼承(raychiutw/purrdr.host#35)。
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [dev-dependencies]
 futures-util.workspace = true
 # 排程測試以暫停的時鐘推進時間。

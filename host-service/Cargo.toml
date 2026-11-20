@@ -19,4 +19,5 @@ tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-
 tokio-tungstenite = "0.30.0"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# deny 而不是 forbid:唯一的例外是 Windows 背景啟動前關掉標準 handle 的繼承(install/system.rs,raychiutw/purrdr.host#35)。
+unsafe_code = "deny"
