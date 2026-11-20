@@ -129,4 +129,6 @@ fn only_write_messages_are_marked_as_write() {
     assert!(decode("client.push-remove.json").is_write());
     assert!(decode("client.push-update-muted.json").is_write());
     assert!(!decode("client.push-status.json").is_write());
+    assert!(decode("client.devices-revoke.json").is_write());
+    assert!(!decode("client.devices-list.json").is_write());
 }
