@@ -1,13 +1,18 @@
 //! 主機服務的更新(raychiutw/purrdr.host#6、#7):假 Release 伺服器加暫存家目錄與假系統，三平台流程都在每個 CI 平台跑。
 
 mod install_support;
+mod support;
 
 use std::time::Duration;
 
 use install_support::release::{FakeReleaseServer, sha256_hex};
 use install_support::{FakeSystem, LAUNCH_AGENT_LABEL, RUN_VALUE, SYSTEMD_UNIT, TEAM_ID, TestHost, executable_names, fake_host_service, snapshot};
+use purrdr_host_service::agent_activity::HerdrAgentActivity;
 use purrdr_host_service::install::{InstallPlatform, InstalledService, Installer};
-use purrdr_host_service::update::{AutomaticOutcome, HttpReleaseSource, InstallLocation, UpdateError, UpdateLauncher, UpdateOutcome, Updater, Version};
+use purrdr_host_service::update::{
+    AgentActivity, AutomaticOutcome, HttpReleaseSource, InstallLocation, UpdateError, UpdateLauncher, UpdateOutcome, Updater, Version,
+};
+use support::{FakeHerdr, recorded, unique_socket};
 
 const PLATFORMS: [InstallPlatform; 3] = [InstallPlatform::MacOs, InstallPlatform::Linux, InstallPlatform::Windows];
 const INSTALLED: &str = "0.5.0";
@@ -108,6 +113,33 @@ impl UpdateLauncher for FakeLauncher {
         self.launches += 1;
         if self.fails { Err("spawn failed".into()) } else { Ok(()) }
     }
+}
+
+/// 固定回報有沒有 `working` Agent 的替身，記下被問幾次。
+struct FakeAgents {
+    working: bool,
+    asked: usize,
+}
+
+impl FakeAgents {
+    fn idle() -> FakeAgents {
+        FakeAgents { working: false, asked: 0 }
+    }
+
+    fn working() -> FakeAgents {
+        FakeAgents { working: true, asked: 0 }
+    }
+}
+
+impl AgentActivity for FakeAgents {
+    fn has_working_agent(&mut self) -> bool {
+        self.asked += 1;
+        self.working
+    }
+}
+
+fn update_status(installed: &InstalledHost) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(installed.host.service_directory().join("update.json")).unwrap()).unwrap()
 }
 
 fn publish(server: &FakeReleaseServer, platform: InstallPlatform, version: &str, traits: &str) {
@@ -389,7 +421,7 @@ fn automatic_check_launches_the_update_when_a_newer_release_exists() {
         let mut updater = installed.updater(&server);
         let mut launcher = FakeLauncher::default();
 
-        let outcome = updater.automatic(&mut launcher);
+        let outcome = updater.automatic(&mut launcher, &mut FakeAgents::idle());
 
         assert_eq!(
             outcome,
@@ -420,7 +452,7 @@ fn automatic_check_does_nothing_when_auto_update_is_off_but_manual_update_still_
     let mut updater = installed.updater(&server);
     let mut launcher = FakeLauncher::default();
 
-    let outcome = updater.automatic(&mut launcher);
+    let outcome = updater.automatic(&mut launcher, &mut FakeAgents::idle());
 
     assert_eq!(outcome, AutomaticOutcome::Disabled);
     assert_eq!(launcher.launches, 0);
@@ -437,11 +469,11 @@ fn automatic_check_when_up_to_date_or_offline_launches_nothing_and_records_the_r
     let mut updater = installed.updater(&server);
     let mut launcher = FakeLauncher::default();
 
-    let up_to_date = updater.automatic(&mut launcher);
+    let up_to_date = updater.automatic(&mut launcher, &mut FakeAgents::idle());
     assert_eq!(up_to_date, AutomaticOutcome::UpToDate(version(INSTALLED)));
     assert_eq!(updater.check().unwrap().last_result.unwrap().result, "up to date (0.5.0)");
     drop(server);
-    let offline = updater.automatic(&mut launcher);
+    let offline = updater.automatic(&mut launcher, &mut FakeAgents::idle());
 
     assert!(matches!(offline, AutomaticOutcome::Failed(UpdateError::Network(_))), "{offline:?}");
     assert_eq!(launcher.launches, 0);
@@ -460,9 +492,131 @@ fn automatic_check_reports_a_launcher_that_cannot_start() {
         ..FakeLauncher::default()
     };
 
-    let outcome = updater.automatic(&mut launcher);
+    let outcome = updater.automatic(&mut launcher, &mut FakeAgents::idle());
 
     assert!(matches!(outcome, AutomaticOutcome::Failed(UpdateError::Io(_))), "{outcome:?}");
+}
+
+#[test]
+fn automatic_check_defers_the_update_while_an_agent_is_working() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "");
+    let mut updater = installed.updater(&server);
+    let mut launcher = FakeLauncher::default();
+    let mut agents = FakeAgents::working();
+
+    let outcome = updater.automatic(&mut launcher, &mut agents);
+
+    assert_eq!(
+        outcome,
+        AutomaticOutcome::Deferred {
+            to: version("0.5.1"),
+            deferred: 1
+        }
+    );
+    assert_eq!(launcher.launches, 0);
+    let status = update_status(&installed);
+    assert_eq!(status["deferred_count"], 1, "{status}");
+    let result = status["result"].as_str().unwrap();
+    assert!(result.contains("deferred") && result.contains("0.5.1"), "{result}");
+}
+
+#[test]
+fn automatic_check_updates_anyway_after_three_deferrals_in_a_row_and_resets_the_count() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "");
+    let mut updater = installed.updater(&server);
+    let mut launcher = FakeLauncher::default();
+    let mut agents = FakeAgents::working();
+
+    let outcomes: Vec<AutomaticOutcome> = (0..4).map(|_| updater.automatic(&mut launcher, &mut agents)).collect();
+
+    let deferrals: Vec<u32> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            AutomaticOutcome::Deferred { deferred, .. } => Some(*deferred),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deferrals, [1, 2, 3], "{outcomes:?}");
+    assert!(matches!(outcomes[3], AutomaticOutcome::Started { .. }), "{outcomes:?}");
+    assert_eq!(launcher.launches, 1);
+    let status = update_status(&installed);
+    assert!(status.get("deferred_count").is_none(), "照常更新後歸零：{status}");
+}
+
+#[test]
+fn manual_update_does_not_wait_for_agents_and_the_next_check_ends_the_deferral_streak() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "");
+    let mut updater = installed.updater(&server);
+    let mut launcher = FakeLauncher::default();
+    let mut agents = FakeAgents::working();
+    assert!(matches!(updater.automatic(&mut launcher, &mut agents), AutomaticOutcome::Deferred { .. }));
+    let asked_before_manual_update = agents.asked;
+
+    let by_hand = updater.apply();
+    let after_update = updater.automatic(&mut launcher, &mut agents);
+
+    assert!(matches!(by_hand, Ok(UpdateOutcome::Updated { .. })), "{by_hand:?}");
+    assert_eq!(after_update, AutomaticOutcome::UpToDate(version("0.5.1")));
+    assert_eq!(agents.asked, asked_before_manual_update, "已是最新時不必問 Agent 狀態");
+    let status = update_status(&installed);
+    assert!(status.get("deferred_count").is_none(), "{status}");
+}
+
+/// 以 herdr 的 `session.snapshot` 判斷 Agent 狀態，跑一次自動檢查(`snapshot` 為 None 時 herdr 沒在跑)。
+fn automatic_check_with_herdr(snapshot: Option<serde_json::Value>) -> (AutomaticOutcome, usize) {
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+    let (socket, _herdr) = match snapshot {
+        Some(snapshot) => {
+            let herdr = runtime.block_on(FakeHerdr::start(vec![("session.snapshot", snapshot)]));
+            (herdr.socket.clone(), Some(herdr))
+        }
+        None => (unique_socket(), None),
+    };
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "");
+    let mut updater = installed.updater(&server);
+    let mut launcher = FakeLauncher::default();
+    let mut agents = HerdrAgentActivity::new(socket, runtime.handle().clone());
+
+    let outcome = updater.automatic(&mut launcher, &mut agents);
+    (outcome, launcher.launches)
+}
+
+/// 錄製的 snapshot 有 `working` 的 Agent;把它們都換成 idle。
+fn snapshot_without_working_agents() -> serde_json::Value {
+    let recorded = serde_json::to_string(&recorded("session.snapshot.ndjson")).unwrap();
+    serde_json::from_str(&recorded.replace(r#""agent_status":"working""#, r#""agent_status":"idle""#)).unwrap()
+}
+
+#[test]
+fn herdr_snapshot_with_a_working_agent_defers_the_automatic_update() {
+    let (outcome, launches) = automatic_check_with_herdr(Some(recorded("session.snapshot.ndjson")));
+
+    assert!(matches!(outcome, AutomaticOutcome::Deferred { deferred: 1, .. }), "{outcome:?}");
+    assert_eq!(launches, 0);
+}
+
+#[test]
+fn herdr_snapshot_without_working_agents_lets_the_automatic_update_start() {
+    let (outcome, launches) = automatic_check_with_herdr(Some(snapshot_without_working_agents()));
+
+    assert!(matches!(outcome, AutomaticOutcome::Started { .. }), "{outcome:?}");
+    assert_eq!(launches, 1);
+}
+
+#[test]
+fn unreachable_herdr_counts_as_idle_and_the_automatic_update_starts() {
+    let (outcome, launches) = automatic_check_with_herdr(None);
+
+    assert!(matches!(outcome, AutomaticOutcome::Started { .. }), "{outcome:?}");
+    assert_eq!(launches, 1);
 }
 
 #[test]
@@ -647,13 +801,13 @@ fn a_rolled_back_version_is_not_retried_automatically_but_can_be_updated_by_hand
     assert!(matches!(updater.apply(), Err(UpdateError::RolledBack { .. })));
     let mut launcher = FakeLauncher::default();
 
-    let same_version = updater.automatic(&mut launcher);
+    let same_version = updater.automatic(&mut launcher, &mut FakeAgents::idle());
     let skipped_record = updater.check().unwrap().last_result.unwrap().result;
     let downloads_before = server.requests().len();
     let by_hand = updater.apply();
     let downloaded_again = server.requests().len() > downloads_before + 1;
     publish(&server, InstallPlatform::Linux, "0.5.2", "");
-    let newer_version = updater.automatic(&mut launcher);
+    let newer_version = updater.automatic(&mut launcher, &mut FakeAgents::idle());
 
     assert_eq!(same_version, AutomaticOutcome::Skipped(version("0.5.1")));
     assert!(skipped_record.contains("0.5.1") && skipped_record.contains("rolled back"), "{skipped_record}");
