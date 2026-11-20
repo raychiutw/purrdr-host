@@ -639,7 +639,7 @@ pub struct PushStatus {
     pub device_id: String,
 }
 
-/// 開啟這支裝置在這台主機的通知：寫入推播配對(與 SSH 路徑相同的 ~/.purrdr/push-<device_id>/pairing,已有就覆寫),外掛還沒安裝就以本機使用者身分執行 herdr plugin install raychiutw/purrdr.host/host-plugin --yes(來源固定，app 不能指定)。安裝失敗時移除剛寫的配對，主機回到原狀並回 push_plugin_failed。
+/// 開啟這支裝置在這台主機的通知：寫入推播配對(與 SSH 路徑相同的 ~/.purrdr/push-<device_id>/pairing,已有就覆寫),外掛還沒安裝就以本機使用者身分執行 herdr plugin install raychiutw/purrdr.host/host-plugin --yes(來源固定，app 不能指定)。安裝失敗時還原成寫入前的樣子並回 push_plugin_failed。已配對(配對檔存在)時重送等於更新配對檔(例如同步 muted):只以原子方式改寫配對檔、不呼叫 herdr,回應的 plugin_installed 一律是 true(要確認外掛請用 push.status)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PushInstall {
     pub request_id: String,

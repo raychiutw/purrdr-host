@@ -59,7 +59,9 @@ foreach ($directory in Get-ChildItem -LiteralPath $root -Directory -Filter 'push
     } catch {
         # 410:裝置已被遠端關閉(配對撤銷),刪掉配對之後不再呼叫後台。其他失敗不重試，下一次「需要你」會再送。
         $response = $_.Exception.Response
-        if ($response -and [int]$response.StatusCode -eq 410) {
+        # 送出期間重新配對了(密鑰換了)就不是被撤銷的那一組，不刪。
+        $current = (Get-Content -LiteralPath $file -ErrorAction SilentlyContinue | Where-Object { $_ -like 'key=*' } | Select-Object -First 1) -replace '^key=', ''
+        if ($response -and [int]$response.StatusCode -eq 410 -and $current -eq $key) {
             Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction SilentlyContinue
         }
     }

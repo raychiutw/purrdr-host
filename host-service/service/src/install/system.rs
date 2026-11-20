@@ -179,6 +179,7 @@ if ($null -eq $value) { exit 3 }
 "#;
 
     /// 以 REG_EXPAND_SZ 寫入(或刪除)`Path`;再以 .NET 刪一個不存在的使用者變數，讓它廣播 WM_SETTINGCHANGE。
+    /// 依賴 .NET Framework 的 `SetEnvironmentVariable(…, 'User')` 寫完登錄後一律廣播(變數原本不存在也會)。
     const WRITE: &str = r#"$ErrorActionPreference = 'Stop'
 $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($env:PURRDR_REGISTRY_KEY)
 if ($env:PURRDR_USER_PATH) {

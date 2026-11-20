@@ -375,6 +375,39 @@ async fn install_and_remove_are_audited_without_the_key() {
     assert!(!audit.contains(KEY), "{audit}");
 }
 
+async fn resending_install_after_the_plugin_disappeared_keeps_the_pairing() {
+    let harness = Harness::start().await;
+    let mut client = harness.client().await;
+    client.request(install("phone-a")).await;
+    std::fs::remove_file(harness.fake.path().join("installed")).unwrap();
+    harness.mark("install-fails");
+
+    let reply = client.request(install("phone-a")).await;
+
+    assert_eq!(reply["type"], "push.install.result", "{reply}");
+    assert!(harness.home_file(".purrdr/push-phone-a/pairing").is_some());
+}
+
+async fn paired_device_updates_muted_without_herdr() {
+    let harness = Harness::start().await;
+    let mut client = harness.client().await;
+    client.request(install("phone-a")).await;
+    let calls_before = harness.calls();
+    harness.mark("list-fails");
+    harness.mark("install-fails");
+    let mut muted = install("phone-a");
+    muted["pairing"]["muted"] = json!(["w2-session", "w1-session"]);
+
+    let reply = client.request(muted).await;
+
+    assert_eq!(reply, state("push.install.result", "i1", true, true, 0));
+    assert_eq!(
+        harness.home_file(".purrdr/push-phone-a/pairing").as_deref(),
+        Some(format!("purrdr-push 1\nendpoint={ENDPOINT}\nkey={KEY}\nmuted=w1-session\nmuted=w2-session\n").as_str())
+    );
+    assert_eq!(harness.calls(), calls_before, "已配對時不呼叫 herdr");
+}
+
 // MARK: - 執行
 
 type TestCase = (&'static str, fn() -> Pin<Box<dyn Future<Output = ()>>>);
@@ -408,6 +441,12 @@ fn tests() -> Vec<TestCase> {
         }),
         ("unsafe_device_ids_and_pairings_are_rejected_without_touching_the_host", || {
             Box::pin(unsafe_device_ids_and_pairings_are_rejected_without_touching_the_host())
+        }),
+        ("resending_install_after_the_plugin_disappeared_keeps_the_pairing", || {
+            Box::pin(resending_install_after_the_plugin_disappeared_keeps_the_pairing())
+        }),
+        ("paired_device_updates_muted_without_herdr", || {
+            Box::pin(paired_device_updates_muted_without_herdr())
         }),
         ("install_and_remove_are_audited_without_the_key", || {
             Box::pin(install_and_remove_are_audited_without_the_key())

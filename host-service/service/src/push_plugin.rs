@@ -109,18 +109,28 @@ impl PushPlugin {
         self.state(device_id).await
     }
 
-    /// 寫入這支裝置的配對，外掛還沒安裝就安裝;安裝失敗時移除剛寫的配對與紀錄。
+    /// 寫入這支裝置的配對，外掛還沒安裝就安裝;安裝失敗時還原成寫入前的樣子。
+    /// 已配對時只更新配對檔(同步靜音),不呼叫 herdr。
     pub async fn pair(&self, device_id: &str, pairing: &PushPairing) -> Result<PushState, PushFailure> {
         validate_device_id(device_id)?;
         let contents = pairing_file(pairing)?;
         let _serial = self.serial.lock().await;
         let purrdr = self.purrdr_directory()?;
-        let plugin_installed = self.plugin_installed().await?;
-        let created_purrdr = !purrdr.exists();
         let device_directory = purrdr.join(format!("push-{device_id}"));
+        if device_directory.join("pairing").is_file() {
+            write_private_file(&device_directory.join("pairing"), &contents)?;
+            return Ok(PushState {
+                plugin_installed: true,
+                paired: true,
+                other_devices: other_pairings(&purrdr, device_id),
+            });
+        }
+        let plugin_installed = self.plugin_installed().await?;
+        let before = FeatureBackup::take(&purrdr, &device_directory)?;
         write_feature(&device_directory, &[("pairing", contents.as_str())])?;
         if !plugin_installed {
             let marker = purrdr.join(PLUGIN_MARKER);
+            let marker_existed = marker.exists();
             let installed = match write_feature(&marker, &[("source", &format!("{PLUGIN_SOURCE}\n"))]) {
                 Ok(()) => {
                     self.run(self.herdr.program_arguments(), &["plugin", "install", PLUGIN_SOURCE, "--yes"], INSTALL_TIMEOUT)
@@ -129,11 +139,10 @@ impl PushPlugin {
                 Err(error) => Err(error.into()),
             };
             if let Err(failure) = installed {
-                let _ = remove_directory(&marker);
-                let _ = remove_directory(&device_directory);
-                if created_purrdr {
-                    let _ = std::fs::remove_dir(&purrdr);
+                if !marker_existed {
+                    let _ = remove_directory(&marker);
                 }
+                before.restore();
                 return Err(failure);
             }
         }
@@ -273,6 +282,61 @@ fn other_pairings(purrdr: &Path, device_id: &str) -> i64 {
         })
         .count();
     i64::try_from(count).unwrap_or(i64::MAX)
+}
+
+/// 寫入配對前的樣子：安裝外掛失敗時還原(原本有的檔案寫回，原本沒有的資料夾移除)。
+struct FeatureBackup {
+    purrdr: PathBuf,
+    purrdr_existed: bool,
+    directory: PathBuf,
+    /// `None`:資料夾原本不存在。
+    files: Option<Vec<(PathBuf, Vec<u8>)>>,
+}
+
+impl FeatureBackup {
+    fn take(purrdr: &Path, directory: &Path) -> std::io::Result<FeatureBackup> {
+        let files = if directory.is_dir() {
+            let mut files = Vec::new();
+            for entry in std::fs::read_dir(directory)? {
+                let path = entry?.path();
+                if path.is_file() {
+                    let contents = std::fs::read(&path)?;
+                    files.push((path, contents));
+                }
+            }
+            Some(files)
+        } else {
+            None
+        };
+        Ok(FeatureBackup {
+            purrdr: purrdr.to_owned(),
+            purrdr_existed: purrdr.exists(),
+            directory: directory.to_owned(),
+            files,
+        })
+    }
+
+    fn restore(self) {
+        match self.files {
+            None => {
+                let _ = remove_directory(&self.directory);
+                if !self.purrdr_existed {
+                    let _ = std::fs::remove_dir(&self.purrdr);
+                }
+            }
+            Some(files) => {
+                for name in ["pairing", "journal.json"] {
+                    let path = self.directory.join(name);
+                    if !files.iter().any(|(original, _)| *original == path) {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+                for (path, contents) in files {
+                    let _ = std::fs::write(path, contents);
+                }
+            }
+        }
+    }
 }
 
 /// 寫一個 `~/.purrdr/<功能>/`:安裝紀錄加上自己的檔案，只有本人可讀。

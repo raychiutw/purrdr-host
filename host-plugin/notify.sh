@@ -48,8 +48,10 @@ for file in "$HOME"/.purrdr/push-*/pairing; do
     fi
   fi
   code=$(printf '{"key":"%s","workspace":"%s","status":"blocked"%s}' "$key" "$workspace" "$extra" |
-    curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'content-type: application/json'       --data-binary @- "$endpoint") || true
-  if [ "$code" = "410" ]; then
+    curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'content-type: application/json' \
+      --data-binary @- "$endpoint") || true
+  # 送出期間重新配對了(密鑰換了)就不是被撤銷的那一組，不刪。
+  if [ "$code" = "410" ] && [ "$(sed -n 's/^key=//p' "$file" | head -n 1)" = "$key" ]; then
     rm -rf "${file%/pairing}"
   fi
 done

@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 
 const PLUGIN_ID: &str = "purrdr.push";
 
+/// 交叉編譯到別台執行時以 `PURRDR_HOST_PLUGIN_DIR` 指定。
 fn plugin_directory() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../host-plugin")
+    std::env::var_os("PURRDR_HOST_PLUGIN_DIR").map_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../host-plugin"), PathBuf::from)
 }
 
 /// manifest:只掛 pane.agent_status_changed,macOS／Linux 用 sh、Windows 用 PowerShell 腳本(檔案都在)。
@@ -123,6 +124,10 @@ if [ -f "$HOME/backend-responses" ]; then
   while read -r key status; do
     grep -q "$key" "$HOME/curl-calls/$n/stdin" && code=$status
   done < "$HOME/backend-responses"
+fi
+# 送出期間這支裝置重新配對了(app 換了新密鑰)。
+if [ -f "$HOME/repair-during-call/device" ]; then
+  cp "$HOME/repair-during-call/pairing" "$HOME/.purrdr/push-$(cat "$HOME/repair-during-call/device")/pairing"
 fi
 printf '%s' "$code"
 "#;
@@ -412,6 +417,20 @@ fi
         assert!(host.is_paired("b2"));
     }
 
+    /// 送出後才重新配對(新密鑰)時，舊密鑰的 410 不刪新的配對
+    #[test]
+    fn revoked_old_key_keeps_a_pairing_renewed_during_the_call() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.respond(&key_a(), 410);
+        host.write("repair-during-call/device", "a1");
+        host.write("repair-during-call/pairing", &format!("purrdr-push 1\nendpoint={ENDPOINT}\nkey={}\n", key_b()));
+
+        host.run_hook(&blocked(), &default_context());
+
+        assert!(host.is_paired("a1"));
+    }
+
     /// 撤銷的配對刪掉後，下次不再對它呼叫後台
     #[test]
     fn removed_pairing_is_not_called_again() {
@@ -467,6 +486,11 @@ mod notify_ps1 {
 
     impl Backend {
         fn start(responses: HashMap<String, u16>) -> Self {
+            Backend::start_renewing(responses, None)
+        }
+
+        /// 回應前先把 `renewal` 的內容寫進那個檔案(送出期間重新配對)。
+        fn start_renewing(responses: HashMap<String, u16>, renewal: Option<(PathBuf, String)>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let endpoint = format!("http://{}/v1/push", listener.local_addr().unwrap());
             let received = Arc::new(Mutex::new(Vec::new()));
@@ -497,6 +521,9 @@ mod notify_ps1 {
                         .unwrap_or_default();
                     let status = responses.get(&key).copied().unwrap_or(200);
                     recorder.lock().unwrap().push(key);
+                    if let Some((path, contents)) = &renewal {
+                        std::fs::write(path, contents).unwrap();
+                    }
                     let reply = format!("HTTP/1.1 {status} Status\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}");
                     let _ = stream.write_all(reply.as_bytes());
                 }
@@ -568,6 +595,22 @@ mod notify_ps1 {
         assert_eq!(backend.keys(), [key_a(), key_b()]);
         assert!(!host.pairing_directory("a1").exists());
         assert!(host.pairing_directory("b2").exists());
+    }
+
+    /// 送出後才重新配對(新密鑰)時，舊密鑰的 410 不刪新的配對
+    #[test]
+    fn revoked_old_key_keeps_a_pairing_renewed_during_the_call() {
+        let host = Host::new();
+        let renewed = host.pairing_directory("a1").join("pairing");
+        let backend = Backend::start_renewing(
+            HashMap::from([(key_a(), 410)]),
+            Some((renewed, format!("purrdr-push 1\nendpoint=http://127.0.0.1:9/v1/push\nkey={}\n", key_b()))),
+        );
+        host.pair("a1", &key_a(), &backend.endpoint);
+
+        host.run_hook();
+
+        assert!(host.pairing_directory("a1").exists());
     }
 
     /// 後台其他錯誤(暫時性)不刪配對

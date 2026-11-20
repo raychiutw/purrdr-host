@@ -131,6 +131,56 @@ fn installed_message_says_to_open_a_new_terminal_unless_no_path() {
     assert!(!skipped.contains(hint), "{skipped}");
 }
 
+#[test]
+fn block_start_without_its_end_keeps_the_rest_of_the_profile() {
+    let host = TestHost::new(InstallPlatform::Linux);
+    let mut environment = host.environment();
+    environment.shell = Some("/bin/bash".into());
+    let profile = host.home.0.join(".bashrc");
+    let original = format!("alias ll='ls -l'\n{BLOCK_START}\nexport KEEP=1\n");
+    std::fs::write(&profile, &original).unwrap();
+    let mut installer = Installer::new(environment, FakeSystem::ready(&host.home.0));
+
+    installer.install(&host.options(PORT), |_| true).unwrap();
+    let installed = std::fs::read_to_string(&profile).unwrap();
+    installer.uninstall().unwrap();
+
+    assert!(installed.starts_with(&original), "{installed}");
+    assert_eq!(std::fs::read_to_string(&profile).unwrap(), original);
+}
+
+#[test]
+fn windows_path_entry_written_with_environment_variables_is_not_added_again() {
+    let host = TestHost::new(InstallPlatform::Windows);
+    let mut system = FakeSystem::ready(&host.home.0);
+    let relative = host.service_directory().join("bin");
+    let relative = relative.strip_prefix(&host.home.0).unwrap().display().to_string();
+    let before = format!("%UserProfile%{}{relative};C:\\Tools", std::path::MAIN_SEPARATOR);
+    system.state.user_path = Some(before.clone());
+    let mut installer = Installer::new(host.environment(), system);
+
+    installer.install(&host.options(PORT), |_| true).unwrap();
+    let installed = installer.system().state.user_path.clone();
+    installer.uninstall().unwrap();
+
+    assert_eq!(installed.as_deref(), Some(before.as_str()));
+    assert_eq!(installer.system().state.user_path.as_deref(), Some(before.as_str()));
+}
+
+#[test]
+fn windows_user_path_longer_than_the_limit_is_not_written() {
+    let host = TestHost::new(InstallPlatform::Windows);
+    let mut system = FakeSystem::ready(&host.home.0);
+    let before = format!("C:\\{}", "a".repeat(32_760));
+    system.state.user_path = Some(before.clone());
+    let mut installer = Installer::new(host.environment(), system);
+
+    let failure = installer.install(&host.options(PORT), |_| true).unwrap_err().to_string();
+
+    assert!(failure.contains("32767"), "{failure}");
+    assert_eq!(installer.system().state.user_path.as_deref(), Some(before.as_str()));
+}
+
 /// 真的讀寫登錄，但用暫存機碼(不碰使用者的 PATH),結束時刪掉。
 #[cfg(windows)]
 #[test]

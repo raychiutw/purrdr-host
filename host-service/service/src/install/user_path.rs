@@ -68,7 +68,12 @@ pub(super) fn add(system: &mut impl HostSystem, layout: &ServiceLayout, shell: O
 fn add_user_path_entry(system: &mut impl HostSystem, layout: &ServiceLayout, change: &mut PathChange) -> Result<(), InstallError> {
     let entry = layout.bin_directory().display().to_string();
     let current = system.user_path().map_err(|error| path_error(&error))?.unwrap_or_default();
-    if let Some(updated) = with_entry(&current, &entry) {
+    if let Some(updated) = with_entry(&current, &entry, &layout.home) {
+        if updated.chars().count() > MAX_ENVIRONMENT_VALUE_LENGTH {
+            return Err(InstallError::Io(format!(
+                "cannot add {entry} to the user PATH: it would be longer than {MAX_ENVIRONMENT_VALUE_LENGTH} characters; shorten PATH or install with --no-path"
+            )));
+        }
         system.set_user_path(Some(&updated)).map_err(|error| path_error(&error))?;
         change.user_path_entry = true;
     }
@@ -81,7 +86,7 @@ pub(super) fn remove(system: &mut impl HostSystem, layout: &ServiceLayout, chang
     if change.user_path_entry {
         let entry = layout.bin_directory().display().to_string();
         if let Some(current) = system.user_path().map_err(|error| path_error(&error))? {
-            let updated = without_entry(&current, &entry);
+            let updated = without_entry(&current, &entry, &layout.home);
             if updated != current {
                 system
                     .set_user_path(Some(&updated).filter(|updated| !updated.is_empty()).map(String::as_str))
@@ -134,35 +139,64 @@ fn path_block(bin: &str, fish: bool) -> String {
     format!("{BLOCK_START}\n{setting}\n{BLOCK_END}\n")
 }
 
-/// 去掉標記區塊(從開始那行到結束那行)。
+/// 去掉標記區塊：只移除開始與結束標記都在的區塊(結束標記配最近的開始標記);缺結束標記時整段保留。
 fn without_block(contents: &str) -> String {
-    let mut kept = String::with_capacity(contents.len());
-    let mut inside = false;
-    for line in contents.split_inclusive('\n') {
-        let text = line.trim_end_matches(['\r', '\n']);
-        if !inside && text == BLOCK_START {
-            inside = true;
-        } else if inside {
-            inside = text != BLOCK_END;
-        } else {
-            kept.push_str(line);
+    let lines: Vec<&str> = contents.split_inclusive('\n').collect();
+    let mut removed = vec![false; lines.len()];
+    let mut open_block: Option<usize> = None;
+    for (index, line) in lines.iter().enumerate() {
+        match line.trim_end_matches(['\r', '\n']) {
+            BLOCK_START => open_block = Some(index),
+            BLOCK_END => {
+                if let Some(start) = open_block.take() {
+                    removed[start..=index].iter_mut().for_each(|flag| *flag = true);
+                }
+            }
+            _ => {}
         }
     }
-    kept
+    lines.iter().zip(removed).filter(|(_, removed)| !removed).map(|(line, _)| *line).collect()
 }
 
 fn path_error(error: &std::io::Error) -> InstallError {
     InstallError::Io(format!("cannot update the user PATH: {error}"))
 }
 
-/// 同一個資料夾：不分大小寫、忽略結尾的 `\`(Windows 路徑)。
-fn same_entry(first: &str, second: &str) -> bool {
-    first.trim_end_matches('\\').eq_ignore_ascii_case(second.trim_end_matches('\\'))
+/// Windows 環境變數值的上限(字元)。
+const MAX_ENVIRONMENT_VALUE_LENGTH: usize = 32_767;
+
+/// 同一個資料夾：展開 `%變數%` 後不分大小寫、忽略結尾的 `\`(Windows 路徑)。
+fn same_entry(existing: &str, entry: &str, home: &Path) -> bool {
+    let expanded = expand_environment(existing, home);
+    expanded.trim_end_matches('\\').eq_ignore_ascii_case(entry.trim_end_matches('\\'))
+}
+
+/// 展開 `%名稱%`:`USERPROFILE` 用安裝的家目錄，其他用目前行程的環境變數;不認得的保留原樣。
+fn expand_environment(value: &str, home: &Path) -> String {
+    let mut expanded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        let Some(length) = rest[start + 1..].find('%') else { break };
+        let name = &rest[start + 1..start + 1 + length];
+        let replacement = if name.eq_ignore_ascii_case("USERPROFILE") {
+            Some(home.display().to_string())
+        } else {
+            std::env::var(name).ok().filter(|_| !name.is_empty())
+        };
+        expanded.push_str(&rest[..start]);
+        match replacement {
+            Some(replacement) => expanded.push_str(&replacement),
+            None => expanded.push_str(&rest[start..start + length + 2]),
+        }
+        rest = &rest[start + length + 2..];
+    }
+    expanded.push_str(rest);
+    expanded
 }
 
 /// 在 `;` 分隔的 PATH 最後加上 `entry`;已經有了回 None。
-fn with_entry(path: &str, entry: &str) -> Option<String> {
-    if path.split(';').any(|existing| same_entry(existing, entry)) {
+fn with_entry(path: &str, entry: &str, home: &Path) -> Option<String> {
+    if path.split(';').any(|existing| same_entry(existing, entry, home)) {
         return None;
     }
     Some(match path {
@@ -172,6 +206,9 @@ fn with_entry(path: &str, entry: &str) -> Option<String> {
     })
 }
 
-fn without_entry(path: &str, entry: &str) -> String {
-    path.split(';').filter(|existing| !same_entry(existing, entry)).collect::<Vec<_>>().join(";")
+fn without_entry(path: &str, entry: &str, home: &Path) -> String {
+    path.split(';')
+        .filter(|existing| !same_entry(existing, entry, home))
+        .collect::<Vec<_>>()
+        .join(";")
 }

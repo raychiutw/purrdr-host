@@ -755,7 +755,10 @@ impl<S: HostSystem> Installer<S> {
 
         if record.add_to_path {
             if let Some(profile) = user_path::shell_profile(layout, self.environment.shell.as_deref()) {
-                self.create_directory(profile.parent().unwrap(), record)?;
+                let directory = profile
+                    .parent()
+                    .ok_or_else(|| InstallError::Io(format!("cannot find the folder of {}", profile.display())))?;
+                self.create_directory(directory, record)?;
             }
             user_path::add(&mut self.system, layout, self.environment.shell.as_deref(), &mut record.path)?;
         } else {
