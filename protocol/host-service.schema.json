@@ -21,7 +21,7 @@
   "x-temporary-file-locations-description": "主機取檔在工作目錄以外、只因對話紀錄提到而放行時，允許的系統暫存目錄(POSIX;macOS 的 /tmp 與 /var/folders 解析後在 /private 底下)。另外還有主機的 TMPDIR／TEMP、Windows 家目錄的 AppData/Local/Temp、家目錄的 .purrdr/uploads 與這段對話紀錄的 tool-results 資料夾。",
   "x-maximum-file-size": 26214400,
   "x-maximum-file-chunk": 1048576,
-  "x-maximum-file-size-description": "主機取檔的大小上限(25 MiB)與一次 file.read 最多回傳的 bytes(1 MiB)。主機服務、app 與 SSH 取檔腳本共用。",
+  "x-maximum-file-size-description": "主機取檔與上傳的大小上限(25 MiB),以及一次 file.read 回傳或 file.upload.chunk 送出的 bytes 上限(1 MiB)。主機服務、app 與 SSH 取檔腳本共用。",
   "$defs": {
     "ClientMessage": {
       "description": "app 送給主機服務的訊息，以 type 區分。標 x-write 的是寫入類操作，唯讀裝置送出時被拒絕(read_only_device)。",
@@ -53,6 +53,8 @@
         { "$ref": "#/$defs/WorkspaceClose" },
         { "$ref": "#/$defs/WorktreeCreate" },
         { "$ref": "#/$defs/AgentStart" },
+        { "$ref": "#/$defs/FileUploadStart" },
+        { "$ref": "#/$defs/FileUploadChunk" },
         { "$ref": "#/$defs/DevicesList" },
         { "$ref": "#/$defs/DevicesRevoke" }
       ]
@@ -88,6 +90,8 @@
         { "$ref": "#/$defs/WorkspaceCloseResult" },
         { "$ref": "#/$defs/WorktreeCreateResult" },
         { "$ref": "#/$defs/AgentStartResult" },
+        { "$ref": "#/$defs/FileUploadStartResult" },
+        { "$ref": "#/$defs/FileUploadChunkResult" },
         { "$ref": "#/$defs/DevicesListResult" },
         { "$ref": "#/$defs/DevicesRevokeResult" },
         { "$ref": "#/$defs/ErrorMessage" }
@@ -851,6 +855,53 @@
       },
       "required": ["type", "request_id", "plugin_installed", "paired", "other_devices"]
     },
+    "FileUploadStart": {
+      "description": "上傳圖片或檔案(raychiutw/purrdr.host#16):開始一次分塊上傳。主機服務在家目錄的 .purrdr/uploads/ 建暫存檔，檔名由主機服務產生(不採用 app 給的名稱),超過 7 天的上傳檔定期刪除。size 超過 x-maximum-file-size 回 upload_too_large。中繼資料剝除在 app 端做，主機服務不解析內容。",
+      "type": "object",
+      "x-write": true,
+      "properties": {
+        "type": { "const": "file.upload.start" },
+        "request_id": { "type": "string", "description": "也是這次上傳的 upload_id。" },
+        "size": { "type": "integer", "minimum": 0, "description": "總 bytes。" },
+        "extension": { "type": "string", "description": "主機檔名的副檔名(不含點):1–16 個英數字元，存成小寫;沒帶時不加副檔名。不合格回 invalid_message。" }
+      },
+      "required": ["type", "request_id", "size"]
+    },
+    "FileUploadStartResult": {
+      "description": "上傳已開始，之後以 upload_id 送分塊。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "file.upload.start.result" },
+        "request_id": { "type": "string" },
+        "upload_id": { "type": "string" }
+      },
+      "required": ["type", "request_id", "upload_id"]
+    },
+    "FileUploadChunk": {
+      "description": "依序送一塊內容(解碼後最多 x-maximum-file-chunk bytes,超過回 upload_too_large)。offset 必須等於已收到的 bytes,超過 size 或 upload_id 不是這條連線開始的都回 invalid_message,失敗後這次上傳作廢。收滿 size 時存成正式檔。連線結束時未完成的上傳刪掉。",
+      "type": "object",
+      "x-write": true,
+      "properties": {
+        "type": { "const": "file.upload.chunk" },
+        "request_id": { "type": "string" },
+        "upload_id": { "type": "string" },
+        "offset": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "string", "description": "標準 base64。" }
+      },
+      "required": ["type", "request_id", "upload_id", "offset", "bytes"]
+    },
+    "FileUploadChunkResult": {
+      "description": "分塊已寫入。收滿 size 時帶 path:主機上的絕對路徑，app 放進 prompt。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "file.upload.chunk.result" },
+        "request_id": { "type": "string" },
+        "upload_id": { "type": "string" },
+        "received": { "type": "integer", "minimum": 0, "description": "目前已收到的 bytes。" },
+        "path": { "type": "string" }
+      },
+      "required": ["type", "request_id", "upload_id", "received"]
+    },
     "DevicesList": {
       "description": "列出這台主機已配對的裝置(raychiutw/purrdr.host#19;不含已撤銷的)。唯讀，唯讀裝置也可用。",
       "type": "object",
@@ -941,7 +992,7 @@
       "required": ["type", "code", "message"]
     },
     "ErrorCode": {
-      "description": "錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。",
+      "description": "錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。",
       "type": "string",
       "enum": [
         "invalid_message",
@@ -964,6 +1015,7 @@
         "file_changed",
         "push_plugin_failed",
         "push_not_paired",
+        "upload_too_large",
         "device_unknown",
         "internal_error"
       ]

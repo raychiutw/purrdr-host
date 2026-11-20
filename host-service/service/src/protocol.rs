@@ -75,6 +75,10 @@ pub enum ClientMessage {
     WorktreeCreate(WorktreeCreate),
     #[serde(rename = "agent.start")]
     AgentStart(AgentStart),
+    #[serde(rename = "file.upload.start")]
+    FileUploadStart(FileUploadStart),
+    #[serde(rename = "file.upload.chunk")]
+    FileUploadChunk(FileUploadChunk),
     #[serde(rename = "devices.list")]
     DevicesList(DevicesList),
     #[serde(rename = "devices.revoke")]
@@ -84,7 +88,7 @@ pub enum ClientMessage {
 impl ClientMessage {
     /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
     pub fn is_write(&self) -> bool {
-        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::DevicesRevoke(_))
+        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_))
     }
 }
 
@@ -148,6 +152,10 @@ pub enum ServerMessage {
     WorktreeCreateResult(WorktreeCreateResult),
     #[serde(rename = "agent.start.result")]
     AgentStartResult(AgentStartResult),
+    #[serde(rename = "file.upload.start.result")]
+    FileUploadStartResult(FileUploadStartResult),
+    #[serde(rename = "file.upload.chunk.result")]
+    FileUploadChunkResult(FileUploadChunkResult),
     #[serde(rename = "devices.list.result")]
     DevicesListResult(DevicesListResult),
     #[serde(rename = "devices.revoke.result")]
@@ -854,6 +862,46 @@ pub struct PushUpdateMutedResult {
     pub other_devices: i64,
 }
 
+/// 上傳圖片或檔案(raychiutw/purrdr.host#16):開始一次分塊上傳。主機服務在家目錄的 .purrdr/uploads/ 建暫存檔，檔名由主機服務產生(不採用 app 給的名稱),超過 7 天的上傳檔定期刪除。size 超過 x-maximum-file-size 回 upload_too_large。中繼資料剝除在 app 端做，主機服務不解析內容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileUploadStart {
+    /// 也是這次上傳的 upload_id。
+    pub request_id: String,
+    /// 總 bytes。
+    pub size: i64,
+    /// 主機檔名的副檔名(不含點):1–16 個英數字元，存成小寫;沒帶時不加副檔名。不合格回 invalid_message。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+}
+
+/// 上傳已開始，之後以 upload_id 送分塊。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileUploadStartResult {
+    pub request_id: String,
+    pub upload_id: String,
+}
+
+/// 依序送一塊內容(解碼後最多 x-maximum-file-chunk bytes,超過回 upload_too_large)。offset 必須等於已收到的 bytes,超過 size 或 upload_id 不是這條連線開始的都回 invalid_message,失敗後這次上傳作廢。收滿 size 時存成正式檔。連線結束時未完成的上傳刪掉。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileUploadChunk {
+    pub request_id: String,
+    pub upload_id: String,
+    pub offset: i64,
+    /// 標準 base64。
+    pub bytes: String,
+}
+
+/// 分塊已寫入。收滿 size 時帶 path:主機上的絕對路徑，app 放進 prompt。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileUploadChunkResult {
+    pub request_id: String,
+    pub upload_id: String,
+    /// 目前已收到的 bytes。
+    pub received: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
 /// 列出這台主機已配對的裝置(raychiutw/purrdr.host#19;不含已撤銷的)。唯讀，唯讀裝置也可用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DevicesList {
@@ -931,7 +979,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
@@ -974,6 +1022,8 @@ pub enum ErrorCode {
     PushPluginFailed,
     #[serde(rename = "push_not_paired")]
     PushNotPaired,
+    #[serde(rename = "upload_too_large")]
+    UploadTooLarge,
     #[serde(rename = "device_unknown")]
     DeviceUnknown,
     #[serde(rename = "internal_error")]

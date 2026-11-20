@@ -138,6 +138,8 @@ fn only_write_messages_are_marked_as_write() {
     ] {
         assert!(decode(name).is_write(), "{name}");
     }
+    assert!(decode("client.file-upload-start.json").is_write());
+    assert!(decode("client.file-upload-chunk.json").is_write());
     assert!(decode("client.devices-revoke.json").is_write());
     assert!(!decode("client.devices-list.json").is_write());
 }
