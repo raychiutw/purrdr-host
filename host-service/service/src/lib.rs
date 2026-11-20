@@ -22,6 +22,7 @@ mod push_plugin;
 pub mod protocol;
 pub mod running_service;
 pub mod state_directory;
+mod structure_operations;
 pub mod transcript;
 mod transcript_session;
 pub mod update;

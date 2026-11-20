@@ -47,7 +47,12 @@
         { "$ref": "#/$defs/PushStatus" },
         { "$ref": "#/$defs/PushInstall" },
         { "$ref": "#/$defs/PushRemove" },
-        { "$ref": "#/$defs/PushUpdateMuted" }
+        { "$ref": "#/$defs/PushUpdateMuted" },
+        { "$ref": "#/$defs/WorkspaceCreate" },
+        { "$ref": "#/$defs/WorkspaceRename" },
+        { "$ref": "#/$defs/WorkspaceClose" },
+        { "$ref": "#/$defs/WorktreeCreate" },
+        { "$ref": "#/$defs/AgentStart" }
       ]
     },
     "ServerMessage": {
@@ -76,6 +81,11 @@
         { "$ref": "#/$defs/PushInstallResult" },
         { "$ref": "#/$defs/PushRemoveResult" },
         { "$ref": "#/$defs/PushUpdateMutedResult" },
+        { "$ref": "#/$defs/WorkspaceCreateResult" },
+        { "$ref": "#/$defs/WorkspaceRenameResult" },
+        { "$ref": "#/$defs/WorkspaceCloseResult" },
+        { "$ref": "#/$defs/WorktreeCreateResult" },
+        { "$ref": "#/$defs/AgentStartResult" },
         { "$ref": "#/$defs/ErrorMessage" }
       ]
     },
@@ -489,6 +499,123 @@
         "type": { "const": "agent.prompt.result" },
         "request_id": { "type": "string" },
         "delivery": { "type": "string", "description": "herdr 回報的送達方式(例如 written_to_pty);沒有時省略。" }
+      },
+      "required": ["type", "request_id"]
+    },
+    "WorkspaceCreate": {
+      "description": "在主機上的資料夾建立 workspace(herdr workspace.create,不搶桌機焦點)。cwd 必須是主機上存在的絕對路徑資料夾(herdr 遇到不存在的資料夾會改開家目錄，所以主機服務先檢查)。新增聊天 = workspace.create 後對 root pane 送 agent.start。",
+      "type": "object",
+      "x-write": true,
+      "properties": {
+        "type": { "const": "workspace.create" },
+        "request_id": { "type": "string" },
+        "cwd": { "type": "string", "description": "主機上的絕對路徑。" },
+        "label": { "type": "string", "description": "workspace 名稱;省略時由 herdr 以資料夾名命名。" }
+      },
+      "required": ["type", "request_id", "cwd"]
+    },
+    "WorkspaceCreateResult": {
+      "description": "workspace 已建立;聊天開在 root_pane_id。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "workspace.create.result" },
+        "request_id": { "type": "string" },
+        "workspace_id": { "type": "string" },
+        "root_pane_id": { "type": "string" }
+      },
+      "required": ["type", "request_id", "workspace_id", "root_pane_id"]
+    },
+    "WorkspaceRename": {
+      "description": "重新命名 workspace(herdr workspace.rename)。",
+      "type": "object",
+      "x-write": true,
+      "properties": {
+        "type": { "const": "workspace.rename" },
+        "request_id": { "type": "string" },
+        "workspace_id": { "type": "string" },
+        "label": { "type": "string", "description": "新名稱，不可空白。" }
+      },
+      "required": ["type", "request_id", "workspace_id", "label"]
+    },
+    "WorkspaceRenameResult": {
+      "description": "已重新命名。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "workspace.rename.result" },
+        "request_id": { "type": "string" },
+        "label": { "type": "string", "description": "herdr 實際保存的名稱(可能經正規化);沒有時省略。" }
+      },
+      "required": ["type", "request_id"]
+    },
+    "WorkspaceClose": {
+      "description": "關閉 workspace(herdr workspace.close):裡面的 tab、pane 與程序都會停止。不連同 worktree 群組一起關，同 repo 的 worktree workspace 還開著時以 herdr_error 回報(herdr_code workspace_group_close_required)。",
+      "type": "object",
+      "x-write": true,
+      "properties": {
+        "type": { "const": "workspace.close" },
+        "request_id": { "type": "string" },
+        "workspace_id": { "type": "string" }
+      },
+      "required": ["type", "request_id", "workspace_id"]
+    },
+    "WorkspaceCloseResult": {
+      "description": "已關閉。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "workspace.close.result" },
+        "request_id": { "type": "string" }
+      },
+      "required": ["type", "request_id"]
+    },
+    "WorktreeCreate": {
+      "description": "以 workspace 所在的 git repo 建立 worktree 與分支，開成新的 workspace(herdr worktree.create,不搶桌機焦點)。分支已存在時 herdr 直接 checkout。不在 git repo 裡時以 herdr_error 回報(herdr_code not_git_worktree)。",
+      "type": "object",
+      "x-write": true,
+      "properties": {
+        "type": { "const": "worktree.create" },
+        "request_id": { "type": "string" },
+        "workspace_id": { "type": "string", "description": "以這個 workspace 的 repo 為底。" },
+        "branch": { "type": "string", "description": "分支名稱：不能以 - 開頭，不含空白、控制字元或 ..。" }
+      },
+      "required": ["type", "request_id", "workspace_id", "branch"]
+    },
+    "WorktreeCreateResult": {
+      "description": "worktree 已建立並開成新的 workspace;聊天開在 root_pane_id。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "worktree.create.result" },
+        "request_id": { "type": "string" },
+        "workspace_id": { "type": "string" },
+        "root_pane_id": { "type": "string" }
+      },
+      "required": ["type", "request_id", "workspace_id", "root_pane_id"]
+    },
+    "AgentStart": {
+      "description": "在 pane 的 shell 啟動 Agent(herdr agent.start)。新增聊天 = workspace.create 或 worktree.create 後對 root pane 送這個。不接受任意參數：只有 Claude Code 可帶 permission_mode(轉成 --permission-mode)。主機服務等 herdr 的時間隨 timeout_ms 延長;Agent 停在啟動問題、pane 不在 shell 提示字元等以 herdr_error 回報(herdr_code 如 agent_not_ready、agent_pane_busy、agent_name_taken)。",
+      "type": "object",
+      "x-write": true,
+      "properties": {
+        "type": { "const": "agent.start" },
+        "request_id": { "type": "string" },
+        "pane_id": { "type": "string" },
+        "name": { "type": "string", "description": "herdr 的 Agent 名稱：英數字、-、_、.,不能以 - 開頭。" },
+        "kind": { "type": "string", "description": "herdr 的 Agent 種類(herdr agent start --kind,例如 claude、codex),只有小寫英文字母與數字。" },
+        "permission_mode": { "$ref": "#/$defs/ClaudePermissionMode" },
+        "timeout_ms": { "type": "integer", "minimum": 3001, "maximum": 300000, "description": "等 Agent 就緒的時間;省略時用 herdr 的預設(30 秒)。" }
+      },
+      "required": ["type", "request_id", "pane_id", "name", "kind"]
+    },
+    "ClaudePermissionMode": {
+      "description": "Claude Code 的 --permission-mode。省略時沿用使用者在主機上的設定。",
+      "type": "string",
+      "enum": ["manual", "acceptEdits", "plan", "auto", "bypassPermissions"]
+    },
+    "AgentStartResult": {
+      "description": "Agent 已在 pane 啟動。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "agent.start.result" },
+        "request_id": { "type": "string" }
       },
       "required": ["type", "request_id"]
     },

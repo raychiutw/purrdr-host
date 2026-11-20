@@ -37,6 +37,8 @@ pub enum AuditEvent {
         device_id: String,
         operation: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         pane_id: Option<String>,
         allowed: bool,
     },

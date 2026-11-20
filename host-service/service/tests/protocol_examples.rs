@@ -129,4 +129,13 @@ fn only_write_messages_are_marked_as_write() {
     assert!(decode("client.push-remove.json").is_write());
     assert!(decode("client.push-update-muted.json").is_write());
     assert!(!decode("client.push-status.json").is_write());
+    for name in [
+        "client.workspace-create.json",
+        "client.workspace-rename.json",
+        "client.workspace-close.json",
+        "client.worktree-create.json",
+        "client.agent-start.json",
+    ] {
+        assert!(decode(name).is_write(), "{name}");
+    }
 }
