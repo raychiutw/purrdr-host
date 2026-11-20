@@ -97,6 +97,8 @@ pub enum ClientMessage {
     HostServiceUpdate(HostServiceUpdate),
     #[serde(rename = "host_service.set_auto_update")]
     HostServiceSetAutoUpdate(HostServiceSetAutoUpdate),
+    #[serde(rename = "pane.read")]
+    PaneRead(PaneRead),
 }
 
 impl ClientMessage {
@@ -190,6 +192,8 @@ pub enum ServerMessage {
     HostServiceSetAutoUpdateResult(HostServiceSetAutoUpdateResult),
     #[serde(rename = "error")]
     ErrorMessage(ErrorMessage),
+    #[serde(rename = "pane.read.result")]
+    PaneReadResult(PaneReadResult),
 }
 
 /// 握手：連線後第一個請求，帶 app 使用的協定版本。
@@ -656,6 +660,51 @@ pub struct PaneSendText {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneSendTextResult {
     pub request_id: String,
+}
+
+/// 讀 Pane 畫面(herdr pane.read,raychiutw/purrdr.host#28)。主機服務只轉送並回傳文字與畫面指紋，不解析語意;pane_id 規則同 Pane 終端機的 target。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneRead {
+    pub request_id: String,
+    pub pane_id: String,
+    pub source: PaneReadSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<PaneReadFormat>,
+    /// recent／recent_unwrapped 的行數(照 herdr);沒帶時由 herdr 決定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<i64>,
+}
+
+/// 照 herdr:visible 可見區、recent 最近輸出、recent_unwrapped 不折行的最近輸出、detection herdr 判斷狀態用的區段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PaneReadSource {
+    #[serde(rename = "visible")]
+    Visible,
+    #[serde(rename = "recent")]
+    Recent,
+    #[serde(rename = "recent_unwrapped")]
+    RecentUnwrapped,
+    #[serde(rename = "detection")]
+    Detection,
+}
+
+/// text 去掉 ANSI(預設);ansi 保留 ANSI 跳脫序列。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PaneReadFormat {
+    #[serde(rename = "text")]
+    Text,
+    #[serde(rename = "ansi")]
+    Ansi,
+}
+
+/// 畫面文字與指紋。screen 是 text 的 UTF-8 bytes 的 SHA-256(小寫 hex);以 source visible、format text 讀到的 screen 可作為 expected_screen。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneReadResult {
+    pub request_id: String,
+    pub text: String,
+    pub screen: String,
+    /// herdr 截短了輸出。
+    pub truncated: bool,
 }
 
 /// 對 Agent 送出 prompt(herdr agent.prompt,target 是 pane_id)。

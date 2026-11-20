@@ -63,7 +63,8 @@
         { "$ref": "#/$defs/DevicesRevoke" },
         { "$ref": "#/$defs/HostServiceStatus" },
         { "$ref": "#/$defs/HostServiceUpdate" },
-        { "$ref": "#/$defs/HostServiceSetAutoUpdate" }
+        { "$ref": "#/$defs/HostServiceSetAutoUpdate" },
+        { "$ref": "#/$defs/PaneRead" }
       ]
     },
     "ServerMessage": {
@@ -108,7 +109,8 @@
         { "$ref": "#/$defs/HostServiceStatusResult" },
         { "$ref": "#/$defs/HostServiceUpdateResult" },
         { "$ref": "#/$defs/HostServiceSetAutoUpdateResult" },
-        { "$ref": "#/$defs/ErrorMessage" }
+        { "$ref": "#/$defs/ErrorMessage" },
+        { "$ref": "#/$defs/PaneReadResult" }
       ]
     },
     "Hello": {
@@ -611,6 +613,41 @@
         "request_id": { "type": "string" }
       },
       "required": ["type", "request_id"]
+    },
+    "PaneRead": {
+      "description": "讀 Pane 畫面(herdr pane.read,raychiutw/purrdr.host#28)。主機服務只轉送並回傳文字與畫面指紋，不解析語意;pane_id 規則同 Pane 終端機的 target。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "pane.read" },
+        "request_id": { "type": "string" },
+        "pane_id": { "type": "string" },
+        "source": { "$ref": "#/$defs/PaneReadSource" },
+        "format": { "$ref": "#/$defs/PaneReadFormat" },
+        "lines": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "recent／recent_unwrapped 的行數(照 herdr);沒帶時由 herdr 決定。" }
+      },
+      "required": ["type", "request_id", "pane_id", "source"]
+    },
+    "PaneReadSource": {
+      "description": "照 herdr:visible 可見區、recent 最近輸出、recent_unwrapped 不折行的最近輸出、detection herdr 判斷狀態用的區段。",
+      "type": "string",
+      "enum": ["visible", "recent", "recent_unwrapped", "detection"]
+    },
+    "PaneReadFormat": {
+      "description": "text 去掉 ANSI(預設);ansi 保留 ANSI 跳脫序列。",
+      "type": "string",
+      "enum": ["text", "ansi"]
+    },
+    "PaneReadResult": {
+      "description": "畫面文字與指紋。screen 是 text 的 UTF-8 bytes 的 SHA-256(小寫 hex);以 source visible、format text 讀到的 screen 可作為 expected_screen。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "pane.read.result" },
+        "request_id": { "type": "string" },
+        "text": { "type": "string" },
+        "screen": { "type": "string" },
+        "truncated": { "type": "boolean", "description": "herdr 截短了輸出。" }
+      },
+      "required": ["type", "request_id", "text", "screen", "truncated"]
     },
     "AgentPrompt": {
       "description": "對 Agent 送出 prompt(herdr agent.prompt,target 是 pane_id)。",

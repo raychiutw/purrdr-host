@@ -57,6 +57,7 @@ extension HostServiceProtocol {
         case hostServiceStatus(HostServiceStatus)
         case hostServiceUpdate(HostServiceUpdate)
         case hostServiceSetAutoUpdate(HostServiceSetAutoUpdate)
+        case paneRead(PaneRead)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -104,6 +105,7 @@ extension HostServiceProtocol {
             case "host_service.status": self = .hostServiceStatus(try HostServiceStatus(from: decoder))
             case "host_service.update": self = .hostServiceUpdate(try HostServiceUpdate(from: decoder))
             case "host_service.set_auto_update": self = .hostServiceSetAutoUpdate(try HostServiceSetAutoUpdate(from: decoder))
+            case "pane.read": self = .paneRead(try PaneRead(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -226,6 +228,9 @@ extension HostServiceProtocol {
             case .hostServiceSetAutoUpdate(let message):
                 try container.encode("host_service.set_auto_update", forKey: .type)
                 try message.encode(to: encoder)
+            case .paneRead(let message):
+                try container.encode("pane.read", forKey: .type)
+                try message.encode(to: encoder)
             }
         }
 
@@ -282,6 +287,7 @@ extension HostServiceProtocol {
         case hostServiceUpdateResult(HostServiceUpdateResult)
         case hostServiceSetAutoUpdateResult(HostServiceSetAutoUpdateResult)
         case errorMessage(ErrorMessage)
+        case paneReadResult(PaneReadResult)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -331,6 +337,7 @@ extension HostServiceProtocol {
             case "host_service.update.result": self = .hostServiceUpdateResult(try HostServiceUpdateResult(from: decoder))
             case "host_service.set_auto_update.result": self = .hostServiceSetAutoUpdateResult(try HostServiceSetAutoUpdateResult(from: decoder))
             case "error": self = .errorMessage(try ErrorMessage(from: decoder))
+            case "pane.read.result": self = .paneReadResult(try PaneReadResult(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -458,6 +465,9 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .errorMessage(let message):
                 try container.encode("error", forKey: .type)
+                try message.encode(to: encoder)
+            case .paneReadResult(let message):
+                try container.encode("pane.read.result", forKey: .type)
                 try message.encode(to: encoder)
             }
         }
@@ -1455,6 +1465,77 @@ extension HostServiceProtocol {
 
         private enum CodingKeys: String, CodingKey {
             case requestId = "request_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 讀 Pane 畫面(herdr pane.read,raychiutw/purrdr.host#28)。主機服務只轉送並回傳文字與畫面指紋，不解析語意;pane_id 規則同 Pane 終端機的 target。
+    public struct PaneRead: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var paneId: String
+        public var source: PaneReadSource
+        public var format: PaneReadFormat?
+        /// recent／recent_unwrapped 的行數(照 herdr);沒帶時由 herdr 決定。
+        public var lines: Int?
+
+        public init(requestId: String, paneId: String, source: PaneReadSource, format: PaneReadFormat? = nil, lines: Int? = nil) {
+            self.requestId = requestId
+            self.paneId = paneId
+            self.source = source
+            self.format = format
+            self.lines = lines
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case paneId = "pane_id"
+            case source
+            case format
+            case lines
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 照 herdr:visible 可見區、recent 最近輸出、recent_unwrapped 不折行的最近輸出、detection herdr 判斷狀態用的區段。
+    public enum PaneReadSource: String, Codable, Sendable, CaseIterable {
+        case visible
+        case recent
+        case recentUnwrapped = "recent_unwrapped"
+        case detection
+    }
+}
+
+extension HostServiceProtocol {
+    /// text 去掉 ANSI(預設);ansi 保留 ANSI 跳脫序列。
+    public enum PaneReadFormat: String, Codable, Sendable, CaseIterable {
+        case text
+        case ansi
+    }
+}
+
+extension HostServiceProtocol {
+    /// 畫面文字與指紋。screen 是 text 的 UTF-8 bytes 的 SHA-256(小寫 hex);以 source visible、format text 讀到的 screen 可作為 expected_screen。
+    public struct PaneReadResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var text: String
+        public var screen: String
+        /// herdr 截短了輸出。
+        public var truncated: Bool
+
+        public init(requestId: String, text: String, screen: String, truncated: Bool) {
+            self.requestId = requestId
+            self.text = text
+            self.screen = screen
+            self.truncated = truncated
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case text
+            case screen
+            case truncated
         }
     }
 }

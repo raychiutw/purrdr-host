@@ -22,6 +22,7 @@ use crate::herdr_cli::HerdrCli;
 use crate::herdr_client::{HerdrClient, HerdrFailure, HerdrSubscription};
 use crate::host_files::{self, FileAccessCache, FileAccessEnvironment, FileAccessRules, FileSnapshot, Located, Purpose, RequestPacing};
 use crate::http::{ServiceContext, blocking};
+use crate::pane_screen;
 use crate::pane_terminal::{self, PaneTerminal};
 use crate::protocol::{
     Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, DevicesListResult, DevicesRevokeResult, ErrorCode,
@@ -322,6 +323,7 @@ impl ClientConnection {
             ClientMessage::TranscriptWorkflow(request) => self.transcripts.workflow(request).await,
             ClientMessage::TranscriptDelegation(request) => self.transcripts.delegation(request).await,
             ClientMessage::PaneSendText(request) => self.pane_send_text(request).await,
+            ClientMessage::PaneRead(request) => pane_screen::read(&self.herdr, request).await,
             ClientMessage::AgentPrompt(request) => self.agent_prompt(request).await,
             ClientMessage::EventsSubscribe(request) => self.events_subscribe(request).await,
             ClientMessage::EventsUnsubscribe(request) => {
