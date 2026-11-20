@@ -250,6 +250,32 @@ pub enum AutomaticOutcome {
     Failed(UpdateError),
 }
 
+/// 推播給配對裝置的更新事件(後台的 `event` 與 `version`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateEvent {
+    Available(Version),
+    Updated(Version),
+    /// 帶的是起不來、已退回的那個版本。
+    RolledBack(Version),
+}
+
+impl UpdateEvent {
+    /// 後台 `POST /v1/push` 的 `event`。
+    pub fn name(&self) -> &'static str {
+        match self {
+            UpdateEvent::Available(_) => "host_service_update_available",
+            UpdateEvent::Updated(_) => "host_service_updated",
+            UpdateEvent::RolledBack(_) => "host_service_update_rolled_back",
+        }
+    }
+
+    pub fn version(&self) -> Version {
+        match self {
+            UpdateEvent::Available(version) | UpdateEvent::Updated(version) | UpdateEvent::RolledBack(version) => *version,
+        }
+    }
+}
+
 /// 啟動獨立的更新程序(`update --yes`):服務重啟時它不會跟著被結束。
 pub trait UpdateLauncher {
     fn launch(&mut self) -> Result<(), String>;
@@ -311,6 +337,8 @@ pub trait InstallLocation {
     fn set_deferred_updates(&mut self, count: u32);
     /// 更新成功後刪掉留下的舊執行檔。
     fn discard_previous(&mut self);
+    /// 通知配對裝置(推播);失敗不影響更新結果。
+    fn notify(&mut self, _event: &UpdateEvent) {}
 }
 
 /// 以 HTTP 取 Release(正式是 GitHub)。
@@ -506,12 +534,20 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
             AutomaticOutcome::Disabled => unreachable!("前面已回傳"),
         };
         self.record(result);
+        if let AutomaticOutcome::Started { to, .. } | AutomaticOutcome::Deferred { to, .. } = &outcome {
+            self.location.notify(&UpdateEvent::Available(*to));
+        }
         outcome
     }
 
     /// 有更大的版本就下載、核對、替換、重啟;新版起不來就退回。結果記下來。
     pub fn apply(&mut self) -> Result<UpdateOutcome, UpdateError> {
         let applied = self.apply_unrecorded();
+        match &applied {
+            Ok(UpdateOutcome::Updated { to, .. }) => self.location.notify(&UpdateEvent::Updated(*to)),
+            Err(UpdateError::RolledBack { failed, .. }) => self.location.notify(&UpdateEvent::RolledBack(*failed)),
+            _ => {}
+        }
         let result = match &applied {
             Ok(UpdateOutcome::Updated { from, to }) => format!("updated {from} -> {to}"),
             Ok(UpdateOutcome::UpToDate { installed, .. }) => format!("up to date ({installed})"),

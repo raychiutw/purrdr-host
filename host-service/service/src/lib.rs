@@ -29,6 +29,7 @@ pub mod transcript;
 mod transcript_reads;
 mod transcript_session;
 pub mod update;
+pub mod update_push;
 pub mod uploads;
 
 mod service_main;

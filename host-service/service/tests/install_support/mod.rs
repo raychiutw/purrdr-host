@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+pub mod push_backend;
 pub mod release;
 
 use std::collections::{BTreeMap, BTreeSet};
