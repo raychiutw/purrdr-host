@@ -8,7 +8,9 @@ use std::time::{Duration, Instant, SystemTime};
 use super::system::{HostSystem, spawn_update_helper};
 use super::{HostEnvironment, InstallError, InstallPlatform, InstallRecord, ServiceLayout, autostart, read_install_record, service_arguments};
 use crate::running_service;
-use crate::update::{InstallLocation, UpdateError, UpdateLauncher, UpdateLock, UpdateRecord, Version};
+use crate::text_format::rfc3339;
+use crate::update::{Clock, InstallLocation, UpdateError, UpdateEvent, UpdateLauncher, UpdateLock, UpdateRecord, Version, system_clock};
+use crate::update_push::{HttpPushTransport, PushTransport, UpdateEventPush};
 
 /// 替換時留下的舊執行檔副檔名。
 const PREVIOUS_SUFFIX: &str = ".previous";
@@ -22,12 +24,18 @@ const SIGNATURE_REQUIREMENT: &str = concat!(
 const FAILED_SUFFIX: &str = ".failed";
 /// 暫存資料夾的序號(同一個程序裡也不重複)。
 static NEXT_STAGING: AtomicU64 = AtomicU64::new(0);
+/// 立即更新的占位多久沒被更新程序接手就失效。
+const LAUNCH_RESERVATION_DURATION: Duration = Duration::from_secs(2 * 60);
+/// `update.json` 裡占位時間的欄位。
+const LAUNCH_RESERVED_AT: &str = "launch_reserved_at";
 
 /// 已安裝的主機服務：依安裝紀錄替換執行檔、重啟背景服務(沿用埠與 session,不動設定與已配對裝置)。
 pub struct InstalledService<S: HostSystem> {
     environment: HostEnvironment,
     system: S,
     start_timeout: Duration,
+    push_transport: Box<dyn PushTransport>,
+    clock: Clock,
 }
 
 impl<S: HostSystem> InstalledService<S> {
@@ -36,7 +44,19 @@ impl<S: HostSystem> InstalledService<S> {
             environment,
             system,
             start_timeout: Duration::from_secs(30),
+            push_transport: Box::new(HttpPushTransport::default()),
+            clock: system_clock(),
         }
+    }
+
+    /// 換掉時鐘(測試推進時間)。
+    pub fn with_clock(self, clock: Clock) -> Self {
+        InstalledService { clock, ..self }
+    }
+
+    /// 換掉送更新事件推播的 HTTP client。
+    pub fn with_push_transport(self, push_transport: Box<dyn PushTransport>) -> Self {
+        InstalledService { push_transport, ..self }
     }
 
     /// 重啟後等新版開始聽埠的時限。
@@ -218,13 +238,17 @@ impl<S: HostSystem> InstallLocation for InstalledService<S> {
         }
     }
 
+    fn notify(&mut self, event: &UpdateEvent) {
+        UpdateEventPush::new(&self.environment.home, self.push_transport.as_mut()).send(event);
+    }
+
     fn auto_update(&mut self) -> Result<bool, UpdateError> {
         Ok(self.record()?.auto_update)
     }
 
     /// `update.json` 只留最後一次，`logs/update.log` 逐行累積;寫不進去不影響更新。
     fn record_result(&mut self, record: &UpdateRecord) {
-        let checked_at = humantime::format_rfc3339_seconds(record.checked_at).to_string();
+        let checked_at = rfc3339(record.checked_at);
         let mut status = self.update_status();
         status.insert("checked_at".into(), checked_at.clone().into());
         status.insert("result".into(), record.result.clone().into());
@@ -262,6 +286,31 @@ impl<S: HostSystem> InstallLocation for InstalledService<S> {
         }
     }
 
+    /// 在 `update.lock` 保護下讀寫 `update.json` 的占位時間;未來的時間視為失效。
+    fn reserve_launch(&mut self) -> Result<(), UpdateError> {
+        let _lock = self.lock()?;
+        let now = (self.clock)();
+        let mut status = self.update_status();
+        let reserved = status
+            .get(LAUNCH_RESERVED_AT)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| humantime::parse_rfc3339(text).ok())
+            .is_some_and(|reserved_at| now.duration_since(reserved_at).is_ok_and(|age| age < LAUNCH_RESERVATION_DURATION));
+        if reserved {
+            return Err(UpdateError::InProgress);
+        }
+        status.insert(LAUNCH_RESERVED_AT.into(), rfc3339(now).into());
+        self.write_update_status(&status);
+        Ok(())
+    }
+
+    fn release_launch(&mut self) {
+        let mut status = self.update_status();
+        if status.remove(LAUNCH_RESERVED_AT).is_some() {
+            self.write_update_status(&status);
+        }
+    }
+
     fn rolled_back_version(&mut self) -> Option<Version> {
         self.update_status().get("rolled_back")?.as_str()?.parse().ok()
     }
@@ -271,6 +320,23 @@ impl<S: HostSystem> InstallLocation for InstalledService<S> {
         match version {
             Some(version) => status.insert("rolled_back".into(), version.to_string().into()),
             None => status.remove("rolled_back"),
+        };
+        self.write_update_status(&status);
+    }
+
+    fn deferred_updates(&mut self) -> u32 {
+        self.update_status()
+            .get("deferred_count")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0, |count| count.try_into().unwrap_or(u32::MAX))
+    }
+
+    /// 0 時移除欄位。
+    fn set_deferred_updates(&mut self, count: u32) {
+        let mut status = self.update_status();
+        match count {
+            0 => status.remove("deferred_count"),
+            count => status.insert("deferred_count".into(), count.into()),
         };
         self.write_update_status(&status);
     }

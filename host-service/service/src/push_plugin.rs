@@ -163,11 +163,10 @@ impl PushPlugin {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(PushFailure::NotPaired),
             Err(error) => return Err(error.into()),
         };
-        let value = |name: &str| current.lines().find_map(|line| line.strip_prefix(name)).map(str::to_owned);
-        let (Some(endpoint), Some(key)) = (value("endpoint="), value("key=")) else {
+        let Some(credentials) = PairingCredentials::parse(&current) else {
             return Err(PushFailure::NotPaired);
         };
-        write_private_file(&file, &pairing_file(&endpoint, &key, muted)?)?;
+        write_private_file(&file, &pairing_file(&credentials.endpoint, &credentials.key, muted)?)?;
         Ok(PushState {
             plugin_installed: true,
             paired: true,
@@ -268,6 +267,23 @@ fn validate_device_id(device_id: &str) -> Result<(), PushFailure> {
         Ok(())
     } else {
         Err(PushFailure::InvalidRequest("invalid push device id"))
+    }
+}
+
+/// 配對檔裡的後台位址與密鑰。
+pub(crate) struct PairingCredentials {
+    pub endpoint: String,
+    pub key: String,
+}
+
+impl PairingCredentials {
+    /// 取 `endpoint=` 與 `key=` 兩行(不檢查格式);缺任何一行時 None。
+    pub fn parse(contents: &str) -> Option<PairingCredentials> {
+        let value = |name: &str| contents.lines().find_map(|line| line.strip_prefix(name)).map(str::to_owned);
+        Some(PairingCredentials {
+            endpoint: value("endpoint=")?,
+            key: value("key=")?,
+        })
     }
 }
 

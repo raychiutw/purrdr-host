@@ -1,0 +1,1 @@
+{"id":"purrdr:1","error":{"code":"worktree_create_failed","message":"Preparing worktree (checking out 'feature/sketch')\nfatal: '/home/demo/.herdr/worktrees/garden-journal/feature-sketch' already exists"}}

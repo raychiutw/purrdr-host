@@ -302,10 +302,56 @@ fi
         assert!(call.arguments.iter().any(|argument| argument == "--max-time"));
     }
 
-    /// 其他狀態(工作中、完成、閒置)不通知
+    /// Agent 完成：同樣帶配對密鑰呼叫後台(是否通知由後台依裝置偏好決定),狀態是 done
+    #[test]
+    fn done_notifies_backend() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+
+        assert_eq!(host.run_hook(&event("done", "w2:p1"), &default_context()), 0);
+
+        let calls = host.curl_calls();
+        assert_eq!(calls.len(), 1);
+        let mut keys: Vec<&str> = calls[0].body.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["key", "pane", "status", "workspace"]);
+        assert_eq!(calls[0].body["key"], key_a().as_str());
+        assert_eq!(calls[0].body["workspace"], "weather-app");
+        assert_eq!(calls[0].body["status"], "done");
+        assert_eq!(calls[0].body["pane"], "w2:p1");
+        assert!(!calls[0].raw_body.contains("secret-plan"));
+    }
+
+    /// 完成時，靜音了這個聊天的裝置一樣跳過
+    #[test]
+    fn done_skips_muted_device() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &["session-weather"]);
+        host.pair("b2", &key_b(), &[]);
+
+        host.run_hook(&event("done", "w2:p1"), &default_context());
+
+        assert_eq!(host.keys(), [key_b()]);
+    }
+
+    /// 完成時後台回 410 一樣刪掉那支裝置的配對
+    #[test]
+    fn done_revoked_pairing_is_removed() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.pair("b2", &key_b(), &[]);
+        host.respond(&key_a(), 410);
+
+        host.run_hook(&event("done", "w2:p1"), &default_context());
+
+        assert!(!host.is_paired("a1"));
+        assert!(host.is_paired("b2"));
+    }
+
+    /// 其他狀態(工作中、閒置)不通知
     #[test]
     fn other_statuses_do_nothing() {
-        for status in ["working", "done", "idle", "unknown"] {
+        for status in ["working", "idle", "unknown", "", "blocked_x", "done2"] {
             let host = Host::new();
             host.pair("a1", &key_a(), &[]);
 
@@ -474,14 +520,17 @@ mod notify_ps1 {
 
     use super::plugin_directory;
 
-    const BLOCKED: &str =
-        r#"{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w2:p1","workspace_id":"w2","agent_status":"blocked"}}"#;
+    fn event(status: &str) -> String {
+        format!(
+            r#"{{"event":"pane_agent_status_changed","data":{{"type":"pane_agent_status_changed","pane_id":"w2:p1","workspace_id":"w2","agent_status":"{status}"}}}}"#
+        )
+    }
     const CONTEXT: &str = r#"{"workspace_id":"w2","workspace_label":"weather-app"}"#;
 
-    /// 依請求本文的 `key` 回應指定狀態碼(沒設定的回 200),記下收到的密鑰。
+    /// 依請求本文的 `key` 回應指定狀態碼(沒設定的回 200),記下收到的本文。
     struct Backend {
         endpoint: String,
-        received: Arc<Mutex<Vec<String>>>,
+        received: Arc<Mutex<Vec<Value>>>,
     }
 
     impl Backend {
@@ -515,12 +564,10 @@ mod notify_ps1 {
                     if reader.read_exact(&mut body).is_err() {
                         continue;
                     }
-                    let key = serde_json::from_slice::<Value>(&body)
-                        .ok()
-                        .and_then(|body| body["key"].as_str().map(str::to_owned))
-                        .unwrap_or_default();
+                    let body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+                    let key = body["key"].as_str().unwrap_or_default().to_owned();
                     let status = responses.get(&key).copied().unwrap_or(200);
-                    recorder.lock().unwrap().push(key);
+                    recorder.lock().unwrap().push(body);
                     if let Some((path, contents)) = &renewal {
                         std::fs::write(path, contents).unwrap();
                     }
@@ -532,9 +579,24 @@ mod notify_ps1 {
         }
 
         fn keys(&self) -> Vec<String> {
-            let mut keys = self.received.lock().unwrap().clone();
+            let mut keys: Vec<String> = self
+                .received
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|body| body["key"].as_str().unwrap_or_default().to_owned())
+                .collect();
             keys.sort();
             keys
+        }
+
+        fn statuses(&self) -> Vec<String> {
+            self.received
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|body| body["status"].as_str().unwrap_or_default().to_owned())
+                .collect()
         }
     }
 
@@ -560,12 +622,16 @@ mod notify_ps1 {
         }
 
         fn run_hook(&self) -> i32 {
+            self.run_hook_with_status("blocked")
+        }
+
+        fn run_hook_with_status(&self, status: &str) -> i32 {
             Command::new("powershell")
                 .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
                 .arg(plugin_directory().join("notify.ps1"))
                 .env("USERPROFILE", self.home.path())
                 .env("HERDR_PLUGIN_EVENT", "pane.agent_status_changed")
-                .env("HERDR_PLUGIN_EVENT_JSON", BLOCKED)
+                .env("HERDR_PLUGIN_EVENT_JSON", event(status))
                 .env("HERDR_PLUGIN_CONTEXT_JSON", CONTEXT)
                 .status()
                 .unwrap()
@@ -626,5 +692,35 @@ mod notify_ps1 {
         assert_eq!(backend.keys(), [key_a(), key_b()]);
         assert!(host.pairing_directory("a1").exists());
         assert!(host.pairing_directory("b2").exists());
+    }
+
+    /// 完成時同樣送出(狀態 done),後台回 410 一樣刪掉配對
+    #[test]
+    fn done_notifies_backend_and_removes_revoked_pairing() {
+        let backend = Backend::start(HashMap::from([(key_a(), 410)]));
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+        host.pair("b2", &key_b(), &backend.endpoint);
+
+        assert_eq!(host.run_hook_with_status("done"), 0);
+
+        assert_eq!(backend.keys(), [key_a(), key_b()]);
+        assert_eq!(backend.statuses(), ["done", "done"]);
+        assert!(!host.pairing_directory("a1").exists());
+        assert!(host.pairing_directory("b2").exists());
+    }
+
+    /// 其他狀態(工作中、閒置)不送
+    #[test]
+    fn other_statuses_do_nothing() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+
+        for status in ["working", "idle", "unknown"] {
+            assert_eq!(host.run_hook_with_status(status), 0, "{status}");
+        }
+
+        assert!(backend.keys().is_empty());
     }
 }

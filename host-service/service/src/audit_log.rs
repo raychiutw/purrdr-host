@@ -32,10 +32,15 @@ pub enum AuditEvent {
     Revoked {
         device_id: String,
         by: RevokedBy,
+        /// `by` 是 `app` 時，發出撤銷的裝置。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        by_device_id: Option<String>,
     },
     Write {
         device_id: String,
         operation: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pane_id: Option<String>,
         allowed: bool,
@@ -49,6 +54,14 @@ pub enum AuditEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         size: Option<u64>,
     },
+    /// 上傳(raychiutw/purrdr.host#16):存成的路徑、宣告的大小與結果(stored、too_large、invalid、failed),不記內容。
+    Upload {
+        device_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        size: u64,
+        result: &'static str,
+    },
 }
 
 /// 誰撤銷的。
@@ -59,6 +72,8 @@ pub enum RevokedBy {
     Host,
     /// 裝置自己(app 刪除主機時)。
     Device,
+    /// 某支裝置的 app 以 devices.revoke 撤銷。
+    App,
 }
 
 #[derive(Serialize)]

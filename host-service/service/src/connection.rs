@@ -16,22 +16,27 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::audit_log::{AuditEvent, AuditLog};
-use crate::device_store::Device;
+use crate::audit_log::{AuditEvent, AuditLog, RevokedBy};
+use crate::device_store::{Device, DeviceStore, RevokeFailure};
 use crate::herdr_cli::HerdrCli;
 use crate::herdr_client::{HerdrClient, HerdrFailure, HerdrSubscription};
 use crate::host_files::{self, FileAccessCache, FileAccessEnvironment, FileAccessRules, FileSnapshot, Located, Purpose, RequestPacing};
 use crate::http::{ServiceContext, blocking};
 use crate::pane_terminal::{self, PaneTerminal};
 use crate::protocol::{
-    Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, ErrorCode, ErrorMessage, EventsEnded, EventsSubscribe,
-    EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus, HerdrServer, PROTOCOL_VERSION,
-    PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent,
-    TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
+    Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, DevicesListResult, DevicesRevokeResult, ErrorCode,
+    ErrorMessage, EventsEnded, EventsSubscribe, EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus,
+    FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, HerdrServer, PROTOCOL_VERSION, PairedDevice, PaneSendKeys,
+    PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent, TerminalScrollDirection,
+    TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
+use crate::remote_management::{self, ServiceManagement};
+use crate::structure_operations;
+use crate::text_format::rfc3339;
 use crate::transcript::AgentSessionInfo;
 use crate::transcript_session::TranscriptSession;
+use crate::uploads::{ChunkOutcome, PendingUpload, UploadDirectory, UploadFailure};
 
 /// 權杖無效或已撤銷時的 close code(4000–4999 由應用程式自訂)。
 pub const UNAUTHORIZED_CLOSE_CODE: u16 = 4401;
@@ -86,6 +91,10 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         file_pacing: RequestPacing::default(),
         file_snapshot: None,
         push: context.push.clone(),
+        uploads: context.files.home.as_deref().map(UploadDirectory::under_home),
+        pending_uploads: HashMap::new(),
+        service_management: context.service_management.clone(),
+        devices: context.devices.clone(),
     };
     let handler = tokio::spawn(handle_requests(connection, request_queue, context, device_token));
     // 逾時沒收到任何 frame(含 pong)就當作 app 已經不在。
@@ -157,6 +166,31 @@ async fn handle_requests(mut connection: ClientConnection, mut queue: mpsc::Unbo
     }
 }
 
+/// 要先送 hello 的訊息;不必的是 hello 本身、推播代裝，以及作用在 hello 後才開的串流、上傳與對話紀錄上的訊息。
+fn requires_handshake(message: &ClientMessage) -> bool {
+    !matches!(
+        message,
+        ClientMessage::Hello(_)
+            | ClientMessage::TranscriptWindow(_)
+            | ClientMessage::TranscriptFollow(_)
+            | ClientMessage::TranscriptUnfollow(_)
+            | ClientMessage::TranscriptPreviews(_)
+            | ClientMessage::TranscriptSubagent(_)
+            | ClientMessage::TranscriptWorkflow(_)
+            | ClientMessage::TranscriptDelegation(_)
+            | ClientMessage::EventsUnsubscribe(_)
+            | ClientMessage::PaneTerminalInput(_)
+            | ClientMessage::PaneTerminalResize(_)
+            | ClientMessage::PaneTerminalScroll(_)
+            | ClientMessage::PaneTerminalClose(_)
+            | ClientMessage::FileUploadChunk(_)
+            | ClientMessage::PushStatus(_)
+            | ClientMessage::PushInstall(_)
+            | ClientMessage::PushUpdateMuted(_)
+            | ClientMessage::PushRemove(_)
+    )
+}
+
 /// 權杖被拒時的錯誤訊息與 close frame。
 fn rejection(code: ErrorCode) -> (ServerMessage, CloseFrame) {
     let (close_code, reason, message) = match code {
@@ -216,6 +250,12 @@ struct ClientConnection {
     /// 主機取檔最近一次從頭讀的快照。
     file_snapshot: Option<FileSnapshot>,
     push: PushPlugin,
+    /// 家目錄的上傳資料夾;找不到家目錄時不能上傳。
+    uploads: Option<UploadDirectory>,
+    /// 進行中的上傳，以 upload_id(開始請求的 request_id)為 key;連線結束時一併刪掉暫存檔。
+    pending_uploads: HashMap<String, PendingUpload>,
+    service_management: Option<ServiceManagement>,
+    devices: DeviceStore,
 }
 
 impl Drop for ClientConnection {
@@ -248,13 +288,14 @@ impl ClientConnection {
             Err(decoding_error) => return Some(error(request_id, ErrorCode::InvalidMessage, &decoding_error.to_string())),
         };
         if message.is_write() {
-            // 稽核只記操作種類與目標 Pane,不記按鍵或 prompt 內容;串流上的輸入(沒有請求識別碼，例如 Pane 終端機的按鍵)
-            // 不逐則記，Pane 終端機只在開啟時記一筆。
-            if request_id.is_some() {
+            // 只記操作種類與目標;串流輸入不記，允許的上傳分塊改在完成或失敗時記一筆 upload。
+            let allowed_upload_chunk = matches!(message, ClientMessage::FileUploadChunk(_)) && !device.read_only;
+            if request_id.is_some() && !allowed_upload_chunk {
                 self.audit.record(
                     AuditEvent::Write {
                         device_id: device.device_id.clone(),
                         operation: value["type"].as_str().unwrap_or_default().to_owned(),
+                        workspace_id: value["workspace_id"].as_str().map(str::to_owned),
                         pane_id: value["pane_id"].as_str().map(str::to_owned),
                         allowed: !device.read_only,
                     },
@@ -265,6 +306,9 @@ impl ClientConnection {
                 return Some(error(request_id, ErrorCode::ReadOnlyDevice, "this device is paired read-only"));
             }
         }
+        if requires_handshake(&message) && !self.handshaken {
+            return Some(error(request_id, ErrorCode::HandshakeRequired, "send hello first"));
+        }
         let reply = match message {
             ClientMessage::Hello(hello) => self.hello(hello.request_id, hello.protocol_version, device.read_only).await,
             ClientMessage::AgentsList(request) => self.agents_list(request.request_id).await,
@@ -273,6 +317,10 @@ impl ClientConnection {
             ClientMessage::TranscriptWindow(request) => self.transcripts.window(request).await,
             ClientMessage::TranscriptFollow(request) => self.transcripts.follow(request).await,
             ClientMessage::TranscriptUnfollow(request) => self.transcripts.unfollow(request),
+            ClientMessage::TranscriptPreviews(request) => self.transcripts.previews(request).await,
+            ClientMessage::TranscriptSubagent(request) => self.transcripts.subagent(request).await,
+            ClientMessage::TranscriptWorkflow(request) => self.transcripts.workflow(request).await,
+            ClientMessage::TranscriptDelegation(request) => self.transcripts.delegation(request).await,
             ClientMessage::PaneSendText(request) => self.pane_send_text(request).await,
             ClientMessage::AgentPrompt(request) => self.agent_prompt(request).await,
             ClientMessage::EventsSubscribe(request) => self.events_subscribe(request).await,
@@ -325,6 +373,20 @@ impl ClientConnection {
                 push_reply(request.request_id, outcome, PushState::muted_result)
             }
             ClientMessage::PushRemove(request) => push_reply(request.request_id, self.push.unpair(&request.device_id).await, PushState::unpaired_result),
+            ClientMessage::WorkspaceCreate(request) => structure_operations::workspace_create(&self.herdr, request).await,
+            ClientMessage::WorkspaceRename(request) => structure_operations::workspace_rename(&self.herdr, request).await,
+            ClientMessage::WorkspaceClose(request) => structure_operations::workspace_close(&self.herdr, request).await,
+            ClientMessage::WorktreeCreate(request) => structure_operations::worktree_create(&self.herdr, request).await,
+            ClientMessage::AgentStart(request) => structure_operations::agent_start(&self.herdr, request).await,
+            ClientMessage::FileUploadStart(request) => self.upload_start(request, device).await,
+            ClientMessage::FileUploadChunk(request) => self.upload_chunk(request, device).await,
+            ClientMessage::HostServiceStatus(request) => remote_management::status(self.service_management.clone(), request.request_id).await,
+            ClientMessage::HostServiceUpdate(request) => remote_management::update(self.service_management.clone(), request.request_id).await,
+            ClientMessage::HostServiceSetAutoUpdate(request) => {
+                remote_management::set_auto_update(self.service_management.clone(), request.request_id, request.enabled).await
+            }
+            ClientMessage::DevicesList(request) => self.devices_list(request.request_id, device).await,
+            ClientMessage::DevicesRevoke(request) => self.devices_revoke(request.request_id, request.device_id, device).await,
             ClientMessage::PaneTerminalClose(close) => {
                 // drop:關閉 stdin(control 等同 release)並結束子行程。
                 self.terminals.remove(&close.stream_id);
@@ -332,6 +394,68 @@ impl ClientConnection {
             }
         };
         Some(reply)
+    }
+
+    /// 已配對(未撤銷)的裝置，不含權杖。
+    async fn devices_list(&self, request_id: String, requester: &Device) -> ServerMessage {
+        let devices = self.devices.clone();
+        let stored_devices = match blocking(move || devices.devices()).await {
+            Ok(stored_devices) => stored_devices,
+            Err(storage_error) => {
+                return error(
+                    Some(request_id),
+                    ErrorCode::InternalError,
+                    &format!("cannot read device store: {storage_error}"),
+                );
+            }
+        };
+        let paired_devices = stored_devices
+            .into_iter()
+            .filter(|stored| stored.revoked_at.is_none())
+            .map(|stored| PairedDevice {
+                current: stored.device_id == requester.device_id,
+                device_id: stored.device_id,
+                name: stored.name,
+                read_only: stored.read_only,
+                paired_at: rfc3339(stored.paired_at),
+            })
+            .collect();
+        ServerMessage::DevicesListResult(DevicesListResult {
+            request_id,
+            devices: paired_devices,
+        })
+    }
+
+    /// 撤銷指定裝置;它的下一個訊息由每則重新驗證拒絕(4401)。
+    async fn devices_revoke(&self, request_id: String, device_id: String, requester: &Device) -> ServerMessage {
+        if device_id == requester.device_id {
+            return error(
+                Some(request_id),
+                ErrorCode::InvalidMessage,
+                "a device cannot revoke itself over the WebSocket; use POST /v1/revoke",
+            );
+        }
+        let devices = self.devices.clone();
+        let target_device_id = device_id.clone();
+        match blocking(move || devices.revoke(&target_device_id, SystemTime::now())).await {
+            Ok(_) => {
+                self.audit.record(
+                    AuditEvent::Revoked {
+                        device_id: device_id.clone(),
+                        by: RevokedBy::App,
+                        by_device_id: Some(requester.device_id.clone()),
+                    },
+                    SystemTime::now(),
+                );
+                ServerMessage::DevicesRevokeResult(DevicesRevokeResult { request_id, device_id })
+            }
+            Err(RevokeFailure::UnknownDevice) => error(Some(request_id), ErrorCode::DeviceUnknown, "no paired device has this id"),
+            Err(RevokeFailure::Storage(storage_error)) => error(
+                Some(request_id),
+                ErrorCode::InternalError,
+                &format!("cannot update device store: {storage_error}"),
+            ),
+        }
     }
 
     /// 開著的 Pane 終端機;已關閉或不存在時略過那個訊息。
@@ -342,9 +466,6 @@ impl ClientConnection {
     /// 以子行程執行 herdr;唯讀裝置用 observe(只能看)。
     fn open_terminal(&mut self, request: PaneTerminalOpen, device: &Device) -> ServerMessage {
         let request_id = request.request_id.clone();
-        if !self.handshaken {
-            return error(Some(request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         if !pane_terminal::is_valid_target(&request.target) || !pane_terminal::is_valid_size(request.columns, request.rows) {
             return error(Some(request_id), ErrorCode::InvalidMessage, "invalid terminal target or size");
         }
@@ -362,6 +483,7 @@ impl ClientConnection {
                 AuditEvent::Write {
                     device_id: device.device_id.clone(),
                     operation: "pane.terminal.open".to_owned(),
+                    workspace_id: None,
                     pane_id: Some(request.target.clone()),
                     allowed: true,
                 },
@@ -377,9 +499,6 @@ impl ClientConnection {
     }
 
     async fn pane_send_text(&self, request: PaneSendText) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let params = json!({"pane_id": request.pane_id, "text": request.text});
         match self.herdr.request("pane.send_text", params).await {
             Ok(_) => ServerMessage::PaneSendTextResult(PaneSendTextResult {
@@ -390,9 +509,6 @@ impl ClientConnection {
     }
 
     async fn agent_prompt(&self, request: AgentPrompt) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let mut params = json!({"target": request.pane_id, "text": request.text});
         let mut herdr_wait = Duration::ZERO;
         if let Some(wait) = request.wait {
@@ -410,9 +526,6 @@ impl ClientConnection {
 
     /// 開 herdr 訂閱;herdr 接受後先回結果，再開始轉送事件(順序不會顛倒)。
     async fn events_subscribe(&mut self, request: EventsSubscribe) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         if self.subscriptions.contains_key(&request.stream_id) {
             return error(
                 Some(request.request_id),
@@ -525,9 +638,6 @@ impl ClientConnection {
     }
 
     async fn file_stat(&mut self, request: FileStat, device: &Device) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let located = match self.locate_file(&request.path, Purpose::Status).await {
             Ok(located) => located,
             Err(failure) => return herdr_error(request.request_id, "session.snapshot", failure),
@@ -543,9 +653,6 @@ impl ClientConnection {
 
     /// 從頭讀或還沒有這個版本的快照時重新檢查並建快照;之後的分塊從快照讀。
     async fn file_read(&mut self, request: FileRead, device: &Device) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let (Ok(offset), Ok(length)) = (u64::try_from(request.offset), u64::try_from(request.length)) else {
             return error(Some(request.request_id), ErrorCode::InvalidMessage, "offset and length must not be negative");
         };
@@ -593,11 +700,88 @@ impl ClientConnection {
         })
     }
 
+    async fn upload_start(&mut self, request: FileUploadStart, device: &Device) -> ServerMessage {
+        let Some(uploads) = self.uploads.clone() else {
+            return error(
+                Some(request.request_id),
+                ErrorCode::InternalError,
+                "host service cannot find the home directory",
+            );
+        };
+        let Ok(size) = u64::try_from(request.size) else {
+            return error(Some(request.request_id), ErrorCode::InvalidMessage, "size must not be negative");
+        };
+        let extension = request.extension.clone();
+        match blocking(move || uploads.begin(size, extension.as_deref())).await {
+            Ok(pending) => {
+                self.pending_uploads.insert(request.request_id.clone(), pending);
+                ServerMessage::FileUploadStartResult(FileUploadStartResult {
+                    upload_id: request.request_id.clone(),
+                    request_id: request.request_id,
+                })
+            }
+            Err(failure) => {
+                self.audit_upload(device, None, size, failure.audit_result());
+                upload_error(request.request_id, failure)
+            }
+        }
+    }
+
+    fn audit_upload(&self, device: &Device, path: Option<String>, size: u64, result: &'static str) {
+        self.audit.record(
+            AuditEvent::Upload {
+                device_id: device.device_id.clone(),
+                path,
+                size,
+                result,
+            },
+            SystemTime::now(),
+        );
+    }
+
+    /// 依序寫入分塊;失敗時這次上傳作廢(drop 時刪掉暫存檔)。
+    async fn upload_chunk(&mut self, request: FileUploadChunk, device: &Device) -> ServerMessage {
+        let Some(mut pending) = self.pending_uploads.remove(&request.upload_id) else {
+            return error(Some(request.request_id), ErrorCode::InvalidMessage, "unknown upload_id");
+        };
+        let Ok(bytes) = BASE64.decode(&request.bytes) else {
+            return error(Some(request.request_id), ErrorCode::InvalidMessage, "bytes is not base64");
+        };
+        let offset = u64::try_from(request.offset).unwrap_or(u64::MAX);
+        let (pending, outcome) = blocking(move || {
+            let outcome = pending.append(offset, &bytes);
+            (pending, outcome)
+        })
+        .await;
+        match outcome {
+            Ok(ChunkOutcome::Partial { received }) => {
+                self.pending_uploads.insert(request.upload_id.clone(), pending);
+                ServerMessage::FileUploadChunkResult(FileUploadChunkResult {
+                    request_id: request.request_id,
+                    upload_id: request.upload_id,
+                    received: received as i64,
+                    path: None,
+                })
+            }
+            Ok(ChunkOutcome::Stored { received, path }) => {
+                let path = path.to_string_lossy().into_owned();
+                self.audit_upload(device, Some(path.clone()), pending.size(), "stored");
+                ServerMessage::FileUploadChunkResult(FileUploadChunkResult {
+                    request_id: request.request_id,
+                    upload_id: request.upload_id,
+                    received: received as i64,
+                    path: Some(path),
+                })
+            }
+            Err(failure) => {
+                self.audit_upload(device, None, pending.size(), failure.audit_result());
+                upload_error(request.request_id, failure)
+            }
+        }
+    }
+
     /// 對話紀錄只能依 herdr 目前回報的 agent_session 定位(#59)。
     async fn transcript_locate(&mut self, request: TranscriptLocate) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let result = match self.herdr.request("session.snapshot", json!({})).await {
             Ok(result) => result,
             Err(failure) => return herdr_error(request.request_id, "session.snapshot", failure),
@@ -622,9 +806,6 @@ impl ClientConnection {
     }
 
     async fn pane_send_keys(&self, request: PaneSendKeys) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let params = json!({"pane_id": request.pane_id, "keys": request.keys});
         match self.herdr.request("pane.send_keys", params).await {
             Ok(_) => ServerMessage::PaneSendKeysResult(PaneSendKeysResult {
@@ -677,9 +858,6 @@ impl ClientConnection {
     }
 
     async fn agents_list(&self, request_id: String) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         match self.herdr.request("session.snapshot", json!({})).await {
             Ok(result) => ServerMessage::AgentsListResult(agents_list_result(request_id, result)),
             Err(failure) => herdr_error(request_id, "session.snapshot", failure),
@@ -776,7 +954,7 @@ fn agents_list_result(request_id: String, result: Value) -> AgentsListResult {
     }
 }
 
-fn herdr_error(request_id: String, method: &str, failure: HerdrFailure) -> ServerMessage {
+pub(crate) fn herdr_error(request_id: String, method: &str, failure: HerdrFailure) -> ServerMessage {
     if failure.is_unknown_method(method) {
         return error(
             Some(request_id),
@@ -825,6 +1003,14 @@ fn push_reply(request_id: String, outcome: Result<PushState, PushFailure>, resul
     }
 }
 
-fn error(request_id: Option<String>, code: ErrorCode, message: &str) -> ServerMessage {
+fn upload_error(request_id: String, failure: UploadFailure) -> ServerMessage {
+    match failure {
+        UploadFailure::TooLarge(message) => error(Some(request_id), ErrorCode::UploadTooLarge, &message),
+        UploadFailure::Invalid(message) => error(Some(request_id), ErrorCode::InvalidMessage, message),
+        UploadFailure::Storage(storage_error) => error(Some(request_id), ErrorCode::InternalError, &format!("cannot write the upload: {storage_error}")),
+    }
+}
+
+pub(crate) fn error(request_id: Option<String>, code: ErrorCode, message: &str) -> ServerMessage {
     ServerMessage::ErrorMessage(error_message(request_id, code, message))
 }

@@ -35,6 +35,14 @@ pub enum ClientMessage {
     TranscriptFollow(TranscriptFollow),
     #[serde(rename = "transcript.unfollow")]
     TranscriptUnfollow(TranscriptUnfollow),
+    #[serde(rename = "transcript.previews")]
+    TranscriptPreviews(TranscriptPreviews),
+    #[serde(rename = "transcript.subagent")]
+    TranscriptSubagent(TranscriptSubagent),
+    #[serde(rename = "transcript.workflow")]
+    TranscriptWorkflow(TranscriptWorkflow),
+    #[serde(rename = "transcript.delegation")]
+    TranscriptDelegation(TranscriptDelegation),
     #[serde(rename = "pane.send_text")]
     PaneSendText(PaneSendText),
     #[serde(rename = "agent.prompt")]
@@ -65,12 +73,36 @@ pub enum ClientMessage {
     PushRemove(PushRemove),
     #[serde(rename = "push.update_muted")]
     PushUpdateMuted(PushUpdateMuted),
+    #[serde(rename = "workspace.create")]
+    WorkspaceCreate(WorkspaceCreate),
+    #[serde(rename = "workspace.rename")]
+    WorkspaceRename(WorkspaceRename),
+    #[serde(rename = "workspace.close")]
+    WorkspaceClose(WorkspaceClose),
+    #[serde(rename = "worktree.create")]
+    WorktreeCreate(WorktreeCreate),
+    #[serde(rename = "agent.start")]
+    AgentStart(AgentStart),
+    #[serde(rename = "file.upload.start")]
+    FileUploadStart(FileUploadStart),
+    #[serde(rename = "file.upload.chunk")]
+    FileUploadChunk(FileUploadChunk),
+    #[serde(rename = "devices.list")]
+    DevicesList(DevicesList),
+    #[serde(rename = "devices.revoke")]
+    DevicesRevoke(DevicesRevoke),
+    #[serde(rename = "host_service.status")]
+    HostServiceStatus(HostServiceStatus),
+    #[serde(rename = "host_service.update")]
+    HostServiceUpdate(HostServiceUpdate),
+    #[serde(rename = "host_service.set_auto_update")]
+    HostServiceSetAutoUpdate(HostServiceSetAutoUpdate),
 }
 
 impl ClientMessage {
     /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
     pub fn is_write(&self) -> bool {
-        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_))
+        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_))
     }
 }
 
@@ -94,6 +126,14 @@ pub enum ServerMessage {
     TranscriptUpdate(TranscriptUpdate),
     #[serde(rename = "transcript.unfollow.result")]
     TranscriptUnfollowResult(TranscriptUnfollowResult),
+    #[serde(rename = "transcript.previews.result")]
+    TranscriptPreviewsResult(TranscriptPreviewsResult),
+    #[serde(rename = "transcript.subagent.result")]
+    TranscriptSubagentResult(TranscriptSubagentResult),
+    #[serde(rename = "transcript.workflow.result")]
+    TranscriptWorkflowResult(TranscriptWorkflowResult),
+    #[serde(rename = "transcript.delegation.result")]
+    TranscriptDelegationResult(TranscriptDelegationResult),
     #[serde(rename = "pane.send_text.result")]
     PaneSendTextResult(PaneSendTextResult),
     #[serde(rename = "agent.prompt.result")]
@@ -124,6 +164,30 @@ pub enum ServerMessage {
     PushRemoveResult(PushRemoveResult),
     #[serde(rename = "push.update_muted.result")]
     PushUpdateMutedResult(PushUpdateMutedResult),
+    #[serde(rename = "workspace.create.result")]
+    WorkspaceCreateResult(WorkspaceCreateResult),
+    #[serde(rename = "workspace.rename.result")]
+    WorkspaceRenameResult(WorkspaceRenameResult),
+    #[serde(rename = "workspace.close.result")]
+    WorkspaceCloseResult(WorkspaceCloseResult),
+    #[serde(rename = "worktree.create.result")]
+    WorktreeCreateResult(WorktreeCreateResult),
+    #[serde(rename = "agent.start.result")]
+    AgentStartResult(AgentStartResult),
+    #[serde(rename = "file.upload.start.result")]
+    FileUploadStartResult(FileUploadStartResult),
+    #[serde(rename = "file.upload.chunk.result")]
+    FileUploadChunkResult(FileUploadChunkResult),
+    #[serde(rename = "devices.list.result")]
+    DevicesListResult(DevicesListResult),
+    #[serde(rename = "devices.revoke.result")]
+    DevicesRevokeResult(DevicesRevokeResult),
+    #[serde(rename = "host_service.status.result")]
+    HostServiceStatusResult(HostServiceStatusResult),
+    #[serde(rename = "host_service.update.result")]
+    HostServiceUpdateResult(HostServiceUpdateResult),
+    #[serde(rename = "host_service.set_auto_update.result")]
+    HostServiceSetAutoUpdateResult(HostServiceSetAutoUpdateResult),
     #[serde(rename = "error")]
     ErrorMessage(ErrorMessage),
 }
@@ -470,6 +534,116 @@ pub struct TranscriptUnfollowResult {
     pub request_id: String,
 }
 
+/// 列表預覽(raychiutw/purrdr.host#17):一次讀多個對話紀錄的檔尾。path 必須是這條連線定位過的，任一個不是就整個請求回 transcript_not_allowed。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptPreviews {
+    pub request_id: String,
+    pub entries: Vec<TranscriptPreviewEntry>,
+}
+
+/// 一個要讀預覽的對話紀錄。known_version 是上次這個主機服務回的 version(app 原樣帶回，不解讀)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptPreviewEntry {
+    pub key: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_version: Option<String>,
+}
+
+/// 每個讀得到的對話紀錄一項(讀不到的不在結果裡，同 SSH 的預覽腳本)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptPreviewsResult {
+    pub request_id: String,
+    pub previews: Vec<TranscriptPreview>,
+}
+
+/// 一個對話紀錄的預覽。records 同其他對話紀錄讀取，每行是原始長度與剝除圖片後的內容:whole 是最後 48000 bytes(第一行可能被切在中間，長度從切點算起)、appended 是 known_version 之後附加的部分、unchanged 沒有內容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptPreview {
+    pub key: String,
+    pub change: TranscriptPreviewChange,
+    pub version: String,
+    pub records: Vec<TranscriptRecord>,
+}
+
+/// 這次讀到的範圍:unchanged 與 known_version 相同、appended 只有附加的部分、whole 整段檔尾。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TranscriptPreviewChange {
+    #[serde(rename = "unchanged")]
+    Unchanged,
+    #[serde(rename = "appended")]
+    Appended,
+    #[serde(rename = "whole")]
+    Whole,
+}
+
+/// 找呼叫 call_id 啟動的 subagent 對話紀錄(raychiutw/purrdr.host#17):在 path 的 session 資料夾的 subagents/ 下找 toolUseId 完全等於 call_id 的 agent-*.meta.json。path 必須是這條連線可讀的對話紀錄。沒有 meta 回 transcript_absent,不只一個回 transcript_ambiguous。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptSubagent {
+    pub request_id: String,
+    pub path: String,
+    pub call_id: String,
+}
+
+/// subagent 對話紀錄的路徑。session 資料夾 subagents/ 底下的 .jsonl 都可以讀視窗與追蹤。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptSubagentResult {
+    pub request_id: String,
+    pub path: String,
+}
+
+/// 讀 workflow 進度(raychiutw/purrdr.host#17):path 的 session 資料夾的 workflows/<run_id>.json(結束才寫)優先，否則 subagents/workflows/<run_id>/journal.jsonl。兩個都沒有回 transcript_absent。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptWorkflow {
+    pub request_id: String,
+    pub path: String,
+    pub run_id: String,
+    /// 上次回的 checksum;相同時不回內容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_checksum: Option<String>,
+}
+
+/// kind 是讀到哪個檔(run 或 journal);content 是檔案原樣內容，checksum 等於 known_checksum 時省略。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptWorkflowResult {
+    pub request_id: String,
+    pub kind: TranscriptWorkflowKind,
+    pub checksum: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
+/// run:workflows/<run_id>.json;journal:subagents/workflows/<run_id>/journal.jsonl。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TranscriptWorkflowKind {
+    #[serde(rename = "run")]
+    Run,
+    #[serde(rename = "journal")]
+    Journal,
+}
+
+/// 父對話紀錄中含 call_id 或 agent_id 的行(委派是否結束，raychiutw/purrdr.host#17)。path 必須是這條連線可讀的對話紀錄。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptDelegation {
+    pub request_id: String,
+    pub path: String,
+    pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// 上次回的 checksum;相同時不回內容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_checksum: Option<String>,
+}
+
+/// 這些行(剝除圖片後)的 checksum 與行;checksum 等於 known_checksum 時省略 records。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptDelegationResult {
+    pub request_id: String,
+    pub checksum: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records: Option<Vec<TranscriptRecord>>,
+}
+
 /// 對 Pane 送出文字(herdr pane.send_text),不補 Enter。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneSendText {
@@ -508,6 +682,111 @@ pub struct AgentPromptResult {
     /// herdr 回報的送達方式(例如 written_to_pty);沒有時省略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<String>,
+}
+
+/// 在主機上的資料夾建立 workspace(herdr workspace.create,不搶桌機焦點)。cwd 必須是主機上存在的絕對路徑資料夾(herdr 遇到不存在的資料夾會改開家目錄，所以主機服務先檢查)。新增聊天 = workspace.create 後對 root pane 送 agent.start。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCreate {
+    pub request_id: String,
+    /// 主機上的絕對路徑。
+    pub cwd: String,
+    /// workspace 名稱;省略時由 herdr 以資料夾名命名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// workspace 已建立;聊天開在 root_pane_id。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCreateResult {
+    pub request_id: String,
+    pub workspace_id: String,
+    pub root_pane_id: String,
+}
+
+/// 重新命名 workspace(herdr workspace.rename)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRename {
+    pub request_id: String,
+    pub workspace_id: String,
+    /// 新名稱，不可空白。
+    pub label: String,
+}
+
+/// 已重新命名。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRenameResult {
+    pub request_id: String,
+    /// herdr 實際保存的名稱(可能經正規化);沒有時省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// 關閉 workspace(herdr workspace.close):裡面的 tab、pane 與程序都會停止。不連同 worktree 群組一起關，同 repo 的 worktree workspace 還開著時以 herdr_error 回報(herdr_code workspace_group_close_required)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceClose {
+    pub request_id: String,
+    pub workspace_id: String,
+}
+
+/// 已關閉。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCloseResult {
+    pub request_id: String,
+}
+
+/// 以 workspace 所在的 git repo 建立 worktree 與分支，開成新的 workspace(herdr worktree.create,不搶桌機焦點)。分支已存在時 herdr 直接 checkout。不在 git repo 裡時以 herdr_error 回報(herdr_code not_git_worktree)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeCreate {
+    pub request_id: String,
+    /// 以這個 workspace 的 repo 為底。
+    pub workspace_id: String,
+    /// 分支名稱：不能以 - 開頭，不含空白、控制字元或 ..。
+    pub branch: String,
+}
+
+/// worktree 已建立並開成新的 workspace;聊天開在 root_pane_id。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeCreateResult {
+    pub request_id: String,
+    pub workspace_id: String,
+    pub root_pane_id: String,
+}
+
+/// 在 pane 的 shell 啟動 Agent(herdr agent.start)。新增聊天 = workspace.create 或 worktree.create 後對 root pane 送這個。不接受任意參數：只有 Claude Code 可帶 permission_mode(轉成 --permission-mode)。主機服務等 herdr 的時間隨 timeout_ms 延長;Agent 停在啟動問題、pane 不在 shell 提示字元等以 herdr_error 回報(herdr_code 如 agent_not_ready、agent_pane_busy、agent_name_taken)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStart {
+    pub request_id: String,
+    pub pane_id: String,
+    /// herdr 的 Agent 名稱：英數字、-、_、.,不能以 - 開頭。
+    pub name: String,
+    /// herdr 的 Agent 種類(herdr agent start --kind,例如 claude、codex),只有小寫英文字母與數字。
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<ClaudePermissionMode>,
+    /// 等 Agent 就緒的時間;省略時用 herdr 的預設(30 秒)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<i64>,
+}
+
+/// Claude Code 的 --permission-mode。省略時沿用使用者在主機上的設定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ClaudePermissionMode {
+    #[serde(rename = "manual")]
+    Manual,
+    #[serde(rename = "acceptEdits")]
+    AcceptEdits,
+    #[serde(rename = "plan")]
+    Plan,
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "bypassPermissions")]
+    BypassPermissions,
+}
+
+/// Agent 已在 pane 啟動。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStartResult {
+    pub request_id: String,
 }
 
 /// 開一條 Agent 事件串流(herdr events.subscribe)。herdr 接受後回 events.subscribe.result,之後以 events.event 推送，直到 events.ended 或 events.unsubscribe。事件只是「該重讀了」的訊號，對帳用 agents.list。
@@ -721,6 +1000,164 @@ pub struct PushUpdateMutedResult {
     pub other_devices: i64,
 }
 
+/// 上傳圖片或檔案(raychiutw/purrdr.host#16):開始一次分塊上傳。主機服務在家目錄的 .purrdr/uploads/ 建暫存檔，檔名由主機服務產生(不採用 app 給的名稱),超過 7 天的上傳檔定期刪除。size 超過 x-maximum-file-size 回 upload_too_large。中繼資料剝除在 app 端做，主機服務不解析內容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileUploadStart {
+    /// 也是這次上傳的 upload_id。
+    pub request_id: String,
+    /// 總 bytes。0 時仍要送一塊 offset 0、內容為空的 chunk,收到後才存檔並回傳路徑。
+    pub size: i64,
+    /// 主機檔名的副檔名(不含點):1–16 個英數字元，存成小寫;沒帶時不加副檔名。不合格回 invalid_message。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+}
+
+/// 上傳已開始，之後以 upload_id 送分塊。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileUploadStartResult {
+    pub request_id: String,
+    pub upload_id: String,
+}
+
+/// 依序送一塊內容(解碼後最多 x-maximum-file-chunk bytes,超過回 upload_too_large)。offset 必須等於已收到的 bytes,超過 size 或 upload_id 不是這條連線開始的都回 invalid_message,失敗後這次上傳作廢。收滿 size 時存成正式檔。連線結束時未完成的上傳刪掉。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileUploadChunk {
+    pub request_id: String,
+    pub upload_id: String,
+    pub offset: i64,
+    /// 標準 base64。
+    pub bytes: String,
+}
+
+/// 分塊已寫入。收滿 size 時帶 path:主機上的絕對路徑，app 放進 prompt。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileUploadChunkResult {
+    pub request_id: String,
+    pub upload_id: String,
+    /// 目前已收到的 bytes。
+    pub received: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// 列出這台主機已配對的裝置(raychiutw/purrdr.host#19;不含已撤銷的)。唯讀，唯讀裝置也可用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicesList {
+    pub request_id: String,
+}
+
+/// 已配對的裝置，依配對先後。不含權杖或其雜湊。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicesListResult {
+    pub request_id: String,
+    pub devices: Vec<PairedDevice>,
+}
+
+/// 一支已配對的裝置。時間是 RFC 3339 UTC(到秒)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedDevice {
+    pub device_id: String,
+    /// 配對時 app 給的裝置名稱。
+    pub name: String,
+    pub read_only: bool,
+    pub paired_at: String,
+    /// 是發出這個請求的裝置。
+    pub current: bool,
+}
+
+/// 撤銷一支已配對的裝置：之後它的每個 WSS 訊息都以 device_token_revoked 與 close code 4401 拒絕。已撤銷的再撤銷一次也成功;不認得的 device_id 回 device_unknown;不能撤銷發出請求的這支裝置(回 invalid_message,撤銷自己用 POST /v1/revoke)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicesRevoke {
+    pub request_id: String,
+    /// devices.list.result 裡的 device_id。
+    pub device_id: String,
+}
+
+/// 已撤銷。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicesRevokeResult {
+    pub request_id: String,
+    pub device_id: String,
+}
+
+/// 從 app 管理主機服務(raychiutw/purrdr.host#18):查已安裝版本、最新版本(問 Release 來源)、自動更新開關、上次檢查或更新的結果與退回過的版本。唯讀，唯讀裝置也可用。沒有安裝(開發中直接執行)時回 host_service_not_installed。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceStatus {
+    pub request_id: String,
+}
+
+/// 主機服務的更新狀態(同主機上的 update --check 與 version)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceStatusResult {
+    pub request_id: String,
+    /// 安裝好的執行檔回報的版本;更新後重啟前可能比 welcome 的 host_service_version 新。
+    pub installed_version: String,
+    /// Release 來源的最新版本;取不到時沒有這欄，改帶 latest_error。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    /// 取不到最新版本的原因(給開發者看)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_error: Option<String>,
+    /// 最新版本比已安裝的大(只往更大的版本更新)。
+    pub update_available: bool,
+    /// 安裝紀錄的自動更新開關。
+    pub auto_update: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update: Option<HostServiceUpdateRecord>,
+    /// 上次更新後起不來、已換回舊版的版本;背景自動更新不再重試它，host_service.update 仍會再試。更新成功後清掉。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rolled_back: Option<String>,
+}
+
+/// 上一次檢查或更新的時間與結果(update.json)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceUpdateRecord {
+    /// RFC 3339(UTC,到秒)。
+    pub checked_at: String,
+    /// 主機上 version 顯示的同一句話，例如 updated 0.5.0 -> 0.5.1、update failed: …(給人看，不解析)。
+    pub result: String,
+}
+
+/// 立即更新：有更大的版本就以獨立程序執行安裝好的 update --yes(與主機上手動更新同一條流程：update.lock、核對 SHA256SUMS、起不來就換回),回應在重啟前送出。主機服務接著重啟、連線中斷，app 重新連線後以 welcome 的 host_service_version 確認結果，失敗退回時 host_service.status 看得到 rolled_back 與 last_update。已有更新在進行回 update_in_progress;取不到最新版本或啟動不了更新程序回 update_failed。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceUpdate {
+    pub request_id: String,
+}
+
+/// started:更新程序已啟動，from_version → to_version;up_to_date:已是最新，沒有更新(不重啟)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceUpdateResult {
+    pub request_id: String,
+    pub outcome: HostServiceUpdateOutcome,
+    /// 已安裝的版本。
+    pub from_version: String,
+    /// 最新版本(started 時是要更新到的版本)。
+    pub to_version: String,
+}
+
+/// 立即更新的結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HostServiceUpdateOutcome {
+    #[serde(rename = "started")]
+    Started,
+    #[serde(rename = "up_to_date")]
+    UpToDate,
+}
+
+/// 開關背景自動更新(同主機上的 auto-update on|off,改安裝紀錄的 auto_update);背景服務下一次檢查時就照新的設定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceSetAutoUpdate {
+    pub request_id: String,
+    pub enabled: bool,
+}
+
+/// 已改好，帶改完後的開關。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceSetAutoUpdateResult {
+    pub request_id: String,
+    pub auto_update: bool,
+}
+
 /// POST /v1/pair 的本文：以配對碼換裝置權杖。QR code 的內容是 purrdr://pair?address=<HTTPS 位址>&code=<配對碼>。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairRequest {
@@ -755,7 +1192,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
@@ -798,6 +1235,16 @@ pub enum ErrorCode {
     PushPluginFailed,
     #[serde(rename = "push_not_paired")]
     PushNotPaired,
+    #[serde(rename = "upload_too_large")]
+    UploadTooLarge,
+    #[serde(rename = "device_unknown")]
+    DeviceUnknown,
+    #[serde(rename = "host_service_not_installed")]
+    HostServiceNotInstalled,
+    #[serde(rename = "update_in_progress")]
+    UpdateInProgress,
+    #[serde(rename = "update_failed")]
+    UpdateFailed,
     #[serde(rename = "internal_error")]
     InternalError,
 }

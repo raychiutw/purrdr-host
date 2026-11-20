@@ -1,14 +1,18 @@
 #!/bin/sh
 # Purrdr 主機外掛(macOS／Linux):herdr 在 pane.agent_status_changed 時以新程序執行這個腳本。
 #
-# Agent 進入 blocked(「需要你」)時，對 ~/.purrdr/push-*/pairing 的每一支配對裝置呼叫 Purrdr 後台的 /v1/push。
+# Agent 進入 blocked(「需要你」)或 done(「完成」)時，對 ~/.purrdr/push-*/pairing 的每一支配對裝置呼叫 Purrdr 後台的 /v1/push;
+# 是否真的通知由後台依裝置偏好決定。
 # 請求只帶 workspace 名稱、狀態與 pane id(推播內容由後台組),不帶終端機標題或任何對話內容。
 # 配對密鑰經 stdin 交給 curl,不出現在指令參數裡。
-# 沒有常駐程序;失敗不重試(下一次「需要你」會再送)。
+# 沒有常駐程序;失敗不重試。
 # 後台回 410(裝置已被遠端關閉、配對撤銷)時刪掉那支裝置的配對資料夾，之後不再對它呼叫後台。
 
 status=$(printf '%s' "${HERDR_PLUGIN_EVENT_JSON:-}" | sed -nE 's/.*"agent_status":"([a-z_]*)".*/\1/p')
-[ "$status" = "blocked" ] || exit 0
+case $status in
+  blocked | done) ;;
+  *) exit 0 ;;
+esac
 
 # 取出 JSON 字串欄位的值，維持 JSON 的跳脫(原樣放回請求的 JSON 裡)。
 json_string() {
@@ -47,7 +51,7 @@ for file in "$HOME"/.purrdr/push-*/pairing; do
       continue
     fi
   fi
-  code=$(printf '{"key":"%s","workspace":"%s","status":"blocked"%s}' "$key" "$workspace" "$extra" |
+  code=$(printf '{"key":"%s","workspace":"%s","status":"%s"%s}' "$key" "$workspace" "$status" "$extra" |
     curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'content-type: application/json' \
       --data-binary @- "$endpoint") || true
   # 送出期間重新配對了(密鑰換了)就不是被撤銷的那一組，不刪。

@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::host_path_mentions;
 use crate::protocol::{EXCLUDED_FILE_LOCATIONS, FileStatus, MAXIMUM_FILE_CHUNK, MAXIMUM_FILE_SIZE, TEMPORARY_FILE_LOCATIONS};
+use crate::text_format::hex;
 
 /// 路徑任何位置連續出現排除清單的段落(不分大小寫;`*` 結尾比對段落開頭)。
 pub fn is_excluded(path: &Path) -> bool {
@@ -495,7 +496,7 @@ fn resolve(path: &Path) -> Option<PathBuf> {
 
 /// 版本：內容的 SHA-256(十六進位)。
 fn version_of(contents: &[u8]) -> String {
-    Sha256::digest(contents).iter().map(|byte| format!("{byte:02x}")).collect()
+    hex(&Sha256::digest(contents))
 }
 
 /// 絕對路徑，沒有控制字元，也沒有 `.`／`..` 段落;Windows 只收磁碟機路徑(UNC 會送出 NTLM,ADS 讀到別的資料流)。
