@@ -30,13 +30,14 @@ use crate::protocol::{
     ErrorMessage, EventsEnded, EventsSubscribe, EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus,
     FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, HerdrServer, PROTOCOL_VERSION, PairedDevice, PaneSendKeys,
     PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent, TerminalScrollDirection,
-    TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
+    SessionsList, SessionsListResult, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
 use crate::remote_management::{self, ServiceManagement};
 use crate::structure_operations;
 use crate::text_format::rfc3339;
-use crate::transcript::AgentSessionInfo;
+use crate::session_history;
+use crate::transcript::{AgentSessionInfo, TranscriptEnvironment};
 use crate::transcript_session::TranscriptSession;
 use crate::uploads::{ChunkOutcome, PendingUpload, UploadDirectory, UploadFailure};
 
@@ -84,6 +85,7 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         outbound: outbound.clone(),
         handshaken: false,
         transcripts: TranscriptSession::new(context.transcripts.clone(), pushes),
+        transcript_environment: context.transcripts.clone(),
         subscriptions: HashMap::new(),
         accepted_subscription: None,
         terminals: HashMap::new(),
@@ -237,6 +239,8 @@ struct ClientConnection {
     outbound: mpsc::UnboundedSender<Outbound>,
     handshaken: bool,
     transcripts: TranscriptSession,
+    /// 續接 session 時找對話紀錄的位置。
+    transcript_environment: TranscriptEnvironment,
     /// 事件串流識別碼 → 轉送 herdr 事件的 task。
     subscriptions: HashMap<String, JoinHandle<()>>,
     /// herdr 剛接受、等訂閱結果送出後才開始轉送的訂閱。
@@ -325,6 +329,7 @@ impl ClientConnection {
             ClientMessage::TranscriptDelegation(request) => self.transcripts.delegation(request).await,
             ClientMessage::PaneSendText(request) => self.pane_send_text(request).await,
             ClientMessage::PaneRead(request) => pane_screen::read(&self.herdr, request).await,
+            ClientMessage::SessionsList(request) => self.sessions_list(request).await,
             ClientMessage::AgentPrompt(request) => self.agent_prompt(request).await,
             ClientMessage::EventsSubscribe(request) => self.events_subscribe(request).await,
             ClientMessage::EventsUnsubscribe(request) => {
@@ -380,7 +385,7 @@ impl ClientConnection {
             ClientMessage::WorkspaceRename(request) => structure_operations::workspace_rename(&self.herdr, request).await,
             ClientMessage::WorkspaceClose(request) => structure_operations::workspace_close(&self.herdr, request).await,
             ClientMessage::WorktreeCreate(request) => structure_operations::worktree_create(&self.herdr, request).await,
-            ClientMessage::AgentStart(request) => structure_operations::agent_start(&self.herdr, request).await,
+            ClientMessage::AgentStart(request) => structure_operations::agent_start(&self.herdr, request, &self.transcript_environment).await,
             ClientMessage::FileUploadStart(request) => self.upload_start(request, device).await,
             ClientMessage::FileUploadChunk(request) => self.upload_chunk(request, device).await,
             ClientMessage::HostServiceStatus(request) => remote_management::status(self.service_management.clone(), request.request_id).await,
@@ -498,6 +503,19 @@ impl ClientConnection {
             request_id: request_id.clone(),
             stream_id: request_id,
             read_only: observe,
+        })
+    }
+
+    /// 工作資料夾過去的 session(在 blocking 執行緒讀檔)。
+    async fn sessions_list(&self, request: SessionsList) -> ServerMessage {
+        if !std::path::Path::new(&request.cwd).is_absolute() {
+            return error(Some(request.request_id), ErrorCode::InvalidMessage, "cwd must be an absolute path");
+        }
+        let environment = self.transcript_environment.clone();
+        let sessions = blocking(move || session_history::list(&environment, &request.cwd, request.agent_kind)).await;
+        ServerMessage::SessionsListResult(SessionsListResult {
+            request_id: request.request_id,
+            sessions,
         })
     }
 

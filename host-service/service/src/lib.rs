@@ -36,6 +36,7 @@ pub mod update_push;
 pub mod uploads;
 
 mod service_main;
+mod session_history;
 
 use audit_log::AuditLog;
 use device_store::DeviceStore;

@@ -9,8 +9,10 @@ use crate::connection::{error, herdr_error};
 use crate::herdr_client::HerdrClient;
 use crate::http::blocking;
 use crate::pane_terminal;
+use crate::session_history;
+use crate::transcript::TranscriptEnvironment;
 use crate::protocol::{
-    AgentStart, AgentStartResult, ErrorCode, ServerMessage, WorkspaceClose, WorkspaceCloseResult, WorkspaceCreate, WorkspaceCreateResult, WorkspaceRename,
+    AgentStart, AgentStartResult, ErrorCode, ResumableAgentKind, ServerMessage, WorkspaceClose, WorkspaceCloseResult, WorkspaceCreate, WorkspaceCreateResult, WorkspaceRename,
     WorkspaceRenameResult, WorktreeCreate, WorktreeCreateResult,
 };
 
@@ -102,7 +104,7 @@ pub async fn worktree_create(herdr: &HerdrClient, request: WorktreeCreate) -> Se
 }
 
 /// 在 pane 的 shell 啟動 Agent。
-pub async fn agent_start(herdr: &HerdrClient, request: AgentStart) -> ServerMessage {
+pub async fn agent_start(herdr: &HerdrClient, request: AgentStart, transcripts: &TranscriptEnvironment) -> ServerMessage {
     let timeout_is_valid = request.timeout_ms.is_none_or(|timeout| AGENT_START_TIMEOUT_MS.contains(&timeout));
     if !is_valid_id(&request.pane_id) || !is_valid_id(&request.name) || !is_valid_agent_kind(&request.kind) || !timeout_is_valid {
         return invalid(request.request_id, "invalid pane_id, name, kind or timeout_ms");
@@ -110,9 +112,29 @@ pub async fn agent_start(herdr: &HerdrClient, request: AgentStart) -> ServerMess
     if request.permission_mode.is_some() && request.kind != "claude" {
         return invalid(request.request_id, "permission_mode is only for claude");
     }
+    let resume = match request.resume_session.as_deref().map(|session| resume_kind(&request.kind, session)) {
+        None => None,
+        Some(Some(resume)) => Some(resume),
+        Some(None) => return invalid(request.request_id, "resume_session needs a claude or codex session id (letters, digits and -)"),
+    };
+    if let Some((kind, session)) = resume.clone() {
+        let environment = transcripts.clone();
+        if !blocking(move || session_history::exists(&environment, kind, &session)).await {
+            return error(Some(request.request_id), ErrorCode::TranscriptAbsent, "no transcript for resume_session on this host");
+        }
+    }
     let mut params = json!({"name": request.name, "kind": request.kind, "pane_id": request.pane_id});
+    let mut args = Vec::new();
     if let Some(permission_mode) = request.permission_mode {
-        params["args"] = json!(["--permission-mode", permission_mode]);
+        args.extend([json!("--permission-mode"), json!(permission_mode)]);
+    }
+    match resume {
+        Some((ResumableAgentKind::Claude, session)) => args.extend([json!("--resume"), json!(session)]),
+        Some((ResumableAgentKind::Codex, session)) => args.extend([json!("resume"), json!(session)]),
+        None => {}
+    }
+    if !args.is_empty() {
+        params["args"] = json!(args);
     }
     let mut herdr_wait = Duration::from_millis(DEFAULT_AGENT_START_TIMEOUT_MS);
     if let Some(timeout) = request.timeout_ms {
@@ -126,6 +148,16 @@ pub async fn agent_start(herdr: &HerdrClient, request: AgentStart) -> ServerMess
         }),
         Err(failure) => herdr_error(request.request_id, "agent.start", failure),
     }
+}
+
+/// 可以續接的 Agent 與安全的 session id;不行時 None。
+fn resume_kind(kind: &str, session: &str) -> Option<(ResumableAgentKind, String)> {
+    let kind = match kind {
+        "claude" => ResumableAgentKind::Claude,
+        "codex" => ResumableAgentKind::Codex,
+        _ => return None,
+    };
+    session_history::is_safe_id(session).then(|| (kind, session.to_owned()))
 }
 
 /// herdr 以 kind 當執行檔名稱，只收小寫英數字。

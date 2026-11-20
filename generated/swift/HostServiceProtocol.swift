@@ -58,6 +58,7 @@ extension HostServiceProtocol {
         case hostServiceUpdate(HostServiceUpdate)
         case hostServiceSetAutoUpdate(HostServiceSetAutoUpdate)
         case paneRead(PaneRead)
+        case sessionsList(SessionsList)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -106,6 +107,7 @@ extension HostServiceProtocol {
             case "host_service.update": self = .hostServiceUpdate(try HostServiceUpdate(from: decoder))
             case "host_service.set_auto_update": self = .hostServiceSetAutoUpdate(try HostServiceSetAutoUpdate(from: decoder))
             case "pane.read": self = .paneRead(try PaneRead(from: decoder))
+            case "sessions.list": self = .sessionsList(try SessionsList(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -231,6 +233,9 @@ extension HostServiceProtocol {
             case .paneRead(let message):
                 try container.encode("pane.read", forKey: .type)
                 try message.encode(to: encoder)
+            case .sessionsList(let message):
+                try container.encode("sessions.list", forKey: .type)
+                try message.encode(to: encoder)
             }
         }
 
@@ -288,6 +293,7 @@ extension HostServiceProtocol {
         case hostServiceSetAutoUpdateResult(HostServiceSetAutoUpdateResult)
         case errorMessage(ErrorMessage)
         case paneReadResult(PaneReadResult)
+        case sessionsListResult(SessionsListResult)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -338,6 +344,7 @@ extension HostServiceProtocol {
             case "host_service.set_auto_update.result": self = .hostServiceSetAutoUpdateResult(try HostServiceSetAutoUpdateResult(from: decoder))
             case "error": self = .errorMessage(try ErrorMessage(from: decoder))
             case "pane.read.result": self = .paneReadResult(try PaneReadResult(from: decoder))
+            case "sessions.list.result": self = .sessionsListResult(try SessionsListResult(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -468,6 +475,9 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .paneReadResult(let message):
                 try container.encode("pane.read.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .sessionsListResult(let message):
+                try container.encode("sessions.list.result", forKey: .type)
                 try message.encode(to: encoder)
             }
         }
@@ -1788,7 +1798,7 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 在 pane 的 shell 啟動 Agent(herdr agent.start)。新增聊天 = workspace.create 或 worktree.create 後對 root pane 送這個。不接受任意參數：只有 Claude Code 可帶 permission_mode(轉成 --permission-mode)。主機服務等 herdr 的時間隨 timeout_ms 延長;Agent 停在啟動問題、pane 不在 shell 提示字元等以 herdr_error 回報(herdr_code 如 agent_not_ready、agent_pane_busy、agent_name_taken)。
+    /// 在 pane 的 shell 啟動 Agent(herdr agent.start)。新增聊天 = workspace.create 或 worktree.create 後對 root pane 送這個。不接受任意參數：只有 Claude Code 可帶 permission_mode(轉成 --permission-mode),Claude Code 與 Codex 可帶 resume_session。主機服務等 herdr 的時間隨 timeout_ms 延長;Agent 停在啟動問題、pane 不在 shell 提示字元等以 herdr_error 回報(herdr_code 如 agent_not_ready、agent_pane_busy、agent_name_taken)。
     public struct AgentStart: Codable, Sendable, Equatable {
         public var requestId: String
         public var paneId: String
@@ -1797,15 +1807,18 @@ extension HostServiceProtocol {
         /// herdr 的 Agent 種類(herdr agent start --kind,例如 claude、codex),只有小寫英文字母與數字。
         public var kind: String
         public var permissionMode: ClaudePermissionMode?
+        /// 續接的 session id(sessions.list 的 id;英數字與 -),只限 claude(轉成 --resume)與 codex(轉成 resume 子指令)。主機服務先確認這個 session 的對話紀錄存在，不在時回 transcript_absent、不啟動(herdr 對不存在的 session 一樣回已啟動，Agent 隨即結束)。
+        public var resumeSession: String?
         /// 等 Agent 就緒的時間;省略時用 herdr 的預設(30 秒)。
         public var timeoutMs: Int?
 
-        public init(requestId: String, paneId: String, name: String, kind: String, permissionMode: ClaudePermissionMode? = nil, timeoutMs: Int? = nil) {
+        public init(requestId: String, paneId: String, name: String, kind: String, permissionMode: ClaudePermissionMode? = nil, resumeSession: String? = nil, timeoutMs: Int? = nil) {
             self.requestId = requestId
             self.paneId = paneId
             self.name = name
             self.kind = kind
             self.permissionMode = permissionMode
+            self.resumeSession = resumeSession
             self.timeoutMs = timeoutMs
         }
 
@@ -1815,6 +1828,7 @@ extension HostServiceProtocol {
             case name
             case kind
             case permissionMode = "permission_mode"
+            case resumeSession = "resume_session"
             case timeoutMs = "timeout_ms"
         }
     }
@@ -1842,6 +1856,78 @@ extension HostServiceProtocol {
 
         private enum CodingKeys: String, CodingKey {
             case requestId = "request_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 列出工作資料夾過去的 Claude／Codex session(raychiutw/purrdr.host#32),給續接用。Claude 讀 <設定目錄>/projects/<cwd 轉成的資料夾名>/*.jsonl;Codex 讀 sessions/ 下 session_meta 的 cwd 等於這個資料夾的 rollout。只回 id、最後修改時間與第一則使用者訊息的摘要，依修改時間新到舊，最多 50 筆。
+    public struct SessionsList: Codable, Sendable, Equatable {
+        public var requestId: String
+        /// 絕對路徑。
+        public var cwd: String
+        public var agentKind: ResumableAgentKind
+
+        public init(requestId: String, cwd: String, agentKind: ResumableAgentKind) {
+            self.requestId = requestId
+            self.cwd = cwd
+            self.agentKind = agentKind
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case cwd
+            case agentKind = "agent_kind"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 可以續接 session 的 Agent。
+    public enum ResumableAgentKind: String, Codable, Sendable, CaseIterable {
+        case claude
+        case codex
+    }
+}
+
+extension HostServiceProtocol {
+    /// 可續接的 session;資料夾不在時是空的。
+    public struct SessionsListResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var sessions: [HistorySession]
+
+        public init(requestId: String, sessions: [HistorySession]) {
+            self.requestId = requestId
+            self.sessions = sessions
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case sessions
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 一個過去的 session。
+    public struct HistorySession: Codable, Sendable, Equatable {
+        /// session id,可直接當 agent.start 的 resume_session。
+        public var id: String
+        /// 對話紀錄最後修改時間(RFC 3339 UTC)。
+        public var modified: String
+        /// 第一則使用者訊息，空白合併後截到 120 字;找不到時省略。
+        public var summary: String?
+
+        public init(id: String, modified: String, summary: String? = nil) {
+            self.id = id
+            self.modified = modified
+            self.summary = summary
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case id
+            case modified
+            case summary
         }
     }
 }

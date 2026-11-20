@@ -99,6 +99,8 @@ pub enum ClientMessage {
     HostServiceSetAutoUpdate(HostServiceSetAutoUpdate),
     #[serde(rename = "pane.read")]
     PaneRead(PaneRead),
+    #[serde(rename = "sessions.list")]
+    SessionsList(SessionsList),
 }
 
 impl ClientMessage {
@@ -194,6 +196,8 @@ pub enum ServerMessage {
     ErrorMessage(ErrorMessage),
     #[serde(rename = "pane.read.result")]
     PaneReadResult(PaneReadResult),
+    #[serde(rename = "sessions.list.result")]
+    SessionsListResult(SessionsListResult),
 }
 
 /// 握手：連線後第一個請求，帶 app 使用的協定版本。
@@ -819,7 +823,7 @@ pub struct WorktreeCreateResult {
     pub root_pane_id: String,
 }
 
-/// 在 pane 的 shell 啟動 Agent(herdr agent.start)。新增聊天 = workspace.create 或 worktree.create 後對 root pane 送這個。不接受任意參數：只有 Claude Code 可帶 permission_mode(轉成 --permission-mode)。主機服務等 herdr 的時間隨 timeout_ms 延長;Agent 停在啟動問題、pane 不在 shell 提示字元等以 herdr_error 回報(herdr_code 如 agent_not_ready、agent_pane_busy、agent_name_taken)。
+/// 在 pane 的 shell 啟動 Agent(herdr agent.start)。新增聊天 = workspace.create 或 worktree.create 後對 root pane 送這個。不接受任意參數：只有 Claude Code 可帶 permission_mode(轉成 --permission-mode),Claude Code 與 Codex 可帶 resume_session。主機服務等 herdr 的時間隨 timeout_ms 延長;Agent 停在啟動問題、pane 不在 shell 提示字元等以 herdr_error 回報(herdr_code 如 agent_not_ready、agent_pane_busy、agent_name_taken)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStart {
     pub request_id: String,
@@ -830,6 +834,9 @@ pub struct AgentStart {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<ClaudePermissionMode>,
+    /// 續接的 session id(sessions.list 的 id;英數字與 -),只限 claude(轉成 --resume)與 codex(轉成 resume 子指令)。主機服務先確認這個 session 的對話紀錄存在，不在時回 transcript_absent、不啟動(herdr 對不存在的 session 一樣回已啟動，Agent 隨即結束)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_session: Option<String>,
     /// 等 Agent 就緒的時間;省略時用 herdr 的預設(30 秒)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<i64>,
@@ -854,6 +861,43 @@ pub enum ClaudePermissionMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStartResult {
     pub request_id: String,
+}
+
+/// 列出工作資料夾過去的 Claude／Codex session(raychiutw/purrdr.host#32),給續接用。Claude 讀 <設定目錄>/projects/<cwd 轉成的資料夾名>/*.jsonl;Codex 讀 sessions/ 下 session_meta 的 cwd 等於這個資料夾的 rollout。只回 id、最後修改時間與第一則使用者訊息的摘要，依修改時間新到舊，最多 50 筆。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionsList {
+    pub request_id: String,
+    /// 絕對路徑。
+    pub cwd: String,
+    pub agent_kind: ResumableAgentKind,
+}
+
+/// 可以續接 session 的 Agent。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResumableAgentKind {
+    #[serde(rename = "claude")]
+    Claude,
+    #[serde(rename = "codex")]
+    Codex,
+}
+
+/// 可續接的 session;資料夾不在時是空的。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionsListResult {
+    pub request_id: String,
+    pub sessions: Vec<HistorySession>,
+}
+
+/// 一個過去的 session。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistorySession {
+    /// session id,可直接當 agent.start 的 resume_session。
+    pub id: String,
+    /// 對話紀錄最後修改時間(RFC 3339 UTC)。
+    pub modified: String,
+    /// 第一則使用者訊息，空白合併後截到 120 字;找不到時省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// 開一條 Agent 事件串流(herdr events.subscribe)。herdr 接受後回 events.subscribe.result,之後以 events.event 推送，直到 events.ended 或 events.unsubscribe。事件只是「該重讀了」的訊號，對帳用 agents.list。
