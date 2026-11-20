@@ -6,7 +6,7 @@
 //!
 //! 移植自 app repo 的 `tests/PurrdrCoreTests/HostPluginScriptTests.swift`,每個測試的說明是原本的測試名稱。
 //! `notify.sh` 只在 macOS／Linux 執行(manifest 限定平台),所以執行腳本的測試只在 Unix 跑;
-//! Windows 的 `notify.ps1` 是 best-effort,沒有自動測試。manifest 的檢查三個平台都跑。
+//! Windows 的 `notify.ps1` 只測後台回應處理(`notify_ps1`,本機假 HTTP 後台)。manifest 的檢查三個平台都跑。
 
 use std::path::{Path, PathBuf};
 
@@ -63,6 +63,13 @@ fn manifest_declares_hooks() {
     }
 }
 
+/// notify.ps1 帶 UTF-8 BOM:Windows PowerShell 5.1 讀沒有 BOM 的檔案用系統字碼頁(如 cp950),中文註解會讓腳本解析失敗。
+#[test]
+fn powershell_script_has_utf8_bom() {
+    let bytes = std::fs::read(plugin_directory().join("notify.ps1")).unwrap();
+    assert!(bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "notify.ps1 缺 UTF-8 BOM");
+}
+
 #[cfg(unix)]
 mod notify_sh {
     use std::os::unix::fs::PermissionsExt;
@@ -111,6 +118,13 @@ n=$(ls "$HOME/curl-calls" 2>/dev/null | wc -l | tr -d ' ')
 mkdir -p "$HOME/curl-calls/$n"
 printf '%s\n' "$@" > "$HOME/curl-calls/$n/args"
 cat > "$HOME/curl-calls/$n/stdin"
+code=200
+if [ -f "$HOME/backend-responses" ]; then
+  while read -r key status; do
+    grep -q "$key" "$HOME/curl-calls/$n/stdin" && code=$status
+  done < "$HOME/backend-responses"
+fi
+printf '%s' "$code"
 "#;
 
     /// `herdr pane get <pane>`:回傳該 pane 的 agent session(錄自 herdr 0.9.5 的 `pane list` 欄位形狀)。
@@ -165,6 +179,18 @@ fi
             let mut lines = vec!["purrdr-push 1".to_owned(), format!("endpoint={ENDPOINT}"), format!("key={key}")];
             lines.extend(muted.iter().map(|session| format!("muted={session}")));
             self.write(&format!(".purrdr/push-{device}/pairing"), &(lines.join("\n") + "\n"));
+        }
+
+        /// 假後台對這把密鑰回應的 HTTP 狀態碼(沒設定的回 200)。
+        fn respond(&self, key: &str, status: u16) {
+            let path = self.path("backend-responses");
+            let mut lines = std::fs::read_to_string(&path).unwrap_or_default();
+            lines.push_str(&format!("{key} {status}\n"));
+            std::fs::write(path, lines).unwrap();
+        }
+
+        fn is_paired(&self, device: &str) -> bool {
+            self.path(&format!(".purrdr/push-{device}")).exists()
         }
 
         /// 以 herdr 的方式執行外掛：新程序、帶事件環境變數。
@@ -367,5 +393,195 @@ fi
         let calls = host.curl_calls();
         let call = calls.first().expect("有送出推播");
         assert!(!call.body.contains_key("pane"));
+    }
+
+    /// 後台回 410(配對已撤銷):刪掉那支裝置的配對資料夾，其他裝置照送
+    #[test]
+    fn revoked_pairing_is_removed() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.pair("b2", &key_b(), &[]);
+        host.respond(&key_a(), 410);
+
+        assert_eq!(host.run_hook(&blocked(), &default_context()), 0);
+
+        let mut keys = host.keys();
+        keys.sort();
+        assert_eq!(keys, [key_a(), key_b()]);
+        assert!(!host.is_paired("a1"));
+        assert!(host.is_paired("b2"));
+    }
+
+    /// 撤銷的配對刪掉後，下次不再對它呼叫後台
+    #[test]
+    fn removed_pairing_is_not_called_again() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.respond(&key_a(), 410);
+
+        host.run_hook(&blocked(), &default_context());
+        host.run_hook(&blocked(), &default_context());
+
+        assert_eq!(host.keys(), [key_a()]);
+    }
+
+    /// 後台其他錯誤(暫時性)不刪配對
+    #[test]
+    fn other_backend_errors_keep_pairing() {
+        for status in [400, 401, 404, 429, 500, 503] {
+            let host = Host::new();
+            host.pair("a1", &key_a(), &[]);
+            host.respond(&key_a(), status);
+
+            host.run_hook(&blocked(), &default_context());
+
+            assert!(host.is_paired("a1"), "{status} 不該刪配對");
+        }
+    }
+}
+
+/// `notify.ps1` 的後台回應處理：真的以 Windows PowerShell 執行，後台換成本機的假 HTTP 伺服器。
+#[cfg(windows)]
+mod notify_ps1 {
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::Value;
+    use tempfile::TempDir;
+
+    use super::plugin_directory;
+
+    const BLOCKED: &str =
+        r#"{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w2:p1","workspace_id":"w2","agent_status":"blocked"}}"#;
+    const CONTEXT: &str = r#"{"workspace_id":"w2","workspace_label":"weather-app"}"#;
+
+    /// 依請求本文的 `key` 回應指定狀態碼(沒設定的回 200),記下收到的密鑰。
+    struct Backend {
+        endpoint: String,
+        received: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Backend {
+        fn start(responses: HashMap<String, u16>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}/v1/push", listener.local_addr().unwrap());
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let recorder = Arc::clone(&received);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut length = 0;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                        if let Some((name, value)) = line.split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    let mut body = vec![0; length];
+                    if reader.read_exact(&mut body).is_err() {
+                        continue;
+                    }
+                    let key = serde_json::from_slice::<Value>(&body)
+                        .ok()
+                        .and_then(|body| body["key"].as_str().map(str::to_owned))
+                        .unwrap_or_default();
+                    let status = responses.get(&key).copied().unwrap_or(200);
+                    recorder.lock().unwrap().push(key);
+                    let reply = format!("HTTP/1.1 {status} Status\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}");
+                    let _ = stream.write_all(reply.as_bytes());
+                }
+            });
+            Backend { endpoint, received }
+        }
+
+        fn keys(&self) -> Vec<String> {
+            let mut keys = self.received.lock().unwrap().clone();
+            keys.sort();
+            keys
+        }
+    }
+
+    struct Host {
+        home: TempDir,
+    }
+
+    impl Host {
+        fn new() -> Self {
+            Host {
+                home: tempfile::tempdir().unwrap(),
+            }
+        }
+
+        fn pairing_directory(&self, device: &str) -> PathBuf {
+            self.home.path().join(".purrdr").join(format!("push-{device}"))
+        }
+
+        fn pair(&self, device: &str, key: &str, endpoint: &str) {
+            let directory = self.pairing_directory(device);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("pairing"), format!("purrdr-push 1\nendpoint={endpoint}\nkey={key}\n")).unwrap();
+        }
+
+        fn run_hook(&self) -> i32 {
+            Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+                .arg(plugin_directory().join("notify.ps1"))
+                .env("USERPROFILE", self.home.path())
+                .env("HERDR_PLUGIN_EVENT", "pane.agent_status_changed")
+                .env("HERDR_PLUGIN_EVENT_JSON", BLOCKED)
+                .env("HERDR_PLUGIN_CONTEXT_JSON", CONTEXT)
+                .status()
+                .unwrap()
+                .code()
+                .unwrap_or(-1)
+        }
+    }
+
+    fn key_a() -> String {
+        "ab".repeat(32)
+    }
+
+    fn key_b() -> String {
+        "cd".repeat(32)
+    }
+
+    /// 後台回 410(配對已撤銷):刪掉那支裝置的配對資料夾，其他裝置照送
+    #[test]
+    fn revoked_pairing_is_removed() {
+        let backend = Backend::start(HashMap::from([(key_a(), 410)]));
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+        host.pair("b2", &key_b(), &backend.endpoint);
+
+        assert_eq!(host.run_hook(), 0);
+
+        assert_eq!(backend.keys(), [key_a(), key_b()]);
+        assert!(!host.pairing_directory("a1").exists());
+        assert!(host.pairing_directory("b2").exists());
+    }
+
+    /// 後台其他錯誤(暫時性)不刪配對
+    #[test]
+    fn other_backend_errors_keep_pairing() {
+        let backend = Backend::start(HashMap::from([(key_a(), 500), (key_b(), 404)]));
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+        host.pair("b2", &key_b(), &backend.endpoint);
+
+        host.run_hook();
+
+        assert_eq!(backend.keys(), [key_a(), key_b()]);
+        assert!(host.pairing_directory("a1").exists());
+        assert!(host.pairing_directory("b2").exists());
     }
 }

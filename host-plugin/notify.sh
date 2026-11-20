@@ -4,7 +4,8 @@
 # Agent 進入 blocked(「需要你」)時，對 ~/.purrdr/push-*/pairing 的每一支配對裝置呼叫 Purrdr 後台的 /v1/push。
 # 請求只帶 workspace 名稱、狀態與 pane id(推播內容由後台組),不帶終端機標題或任何對話內容。
 # 配對密鑰經 stdin 交給 curl,不出現在指令參數裡。
-# 沒有常駐程序、不寫任何狀態;失敗不重試(下一次「需要你」會再送)。
+# 沒有常駐程序;失敗不重試(下一次「需要你」會再送)。
+# 後台回 410(裝置已被遠端關閉、配對撤銷)時刪掉那支裝置的配對資料夾，之後不再對它呼叫後台。
 
 status=$(printf '%s' "${HERDR_PLUGIN_EVENT_JSON:-}" | sed -nE 's/.*"agent_status":"([a-z_]*)".*/\1/p')
 [ "$status" = "blocked" ] || exit 0
@@ -46,6 +47,9 @@ for file in "$HOME"/.purrdr/push-*/pairing; do
       continue
     fi
   fi
-  printf '{"key":"%s","workspace":"%s","status":"blocked"%s}' "$key" "$workspace" "$extra" |
-    curl -sS -o /dev/null --max-time 10 -X POST -H 'content-type: application/json' --data-binary @- "$endpoint" || true
+  code=$(printf '{"key":"%s","workspace":"%s","status":"blocked"%s}' "$key" "$workspace" "$extra" |
+    curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'content-type: application/json'       --data-binary @- "$endpoint") || true
+  if [ "$code" = "410" ]; then
+    rm -rf "${file%/pairing}"
+  fi
 done
