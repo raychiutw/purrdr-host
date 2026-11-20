@@ -93,6 +93,19 @@ async fn chunks_are_stored_under_home_uploads_and_the_absolute_path_is_returned(
 }
 
 #[tokio::test]
+async fn empty_upload_is_stored_after_one_empty_chunk() {
+    let fixture = Fixture::start().await;
+    let mut client = fixture.client().await;
+
+    client.request(start("u1", 0, None)).await;
+    let reply = client.request(chunk("c1", "u1", 0, b"")).await;
+
+    assert_eq!(reply["received"], 0);
+    let path = PathBuf::from(reply["path"].as_str().expect("空檔收到空 chunk 後帶路徑"));
+    assert!(std::fs::read(&path).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn upload_larger_than_the_maximum_file_size_is_rejected_before_anything_is_written() {
     let fixture = Fixture::start().await;
     let mut client = fixture.client().await;

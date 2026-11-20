@@ -1005,7 +1005,7 @@ pub struct PushUpdateMutedResult {
 pub struct FileUploadStart {
     /// 也是這次上傳的 upload_id。
     pub request_id: String,
-    /// 總 bytes。
+    /// 總 bytes。0 時仍要送一塊 offset 0、內容為空的 chunk,收到後才存檔並回傳路徑。
     pub size: i64,
     /// 主機檔名的副檔名(不含點):1–16 個英數字元，存成小寫;沒帶時不加副檔名。不合格回 invalid_message。
     #[serde(default, skip_serializing_if = "Option::is_none")]
