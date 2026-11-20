@@ -65,12 +65,18 @@ pub enum ClientMessage {
     PushRemove(PushRemove),
     #[serde(rename = "push.update_muted")]
     PushUpdateMuted(PushUpdateMuted),
+    #[serde(rename = "host_service.status")]
+    HostServiceStatus(HostServiceStatus),
+    #[serde(rename = "host_service.update")]
+    HostServiceUpdate(HostServiceUpdate),
+    #[serde(rename = "host_service.set_auto_update")]
+    HostServiceSetAutoUpdate(HostServiceSetAutoUpdate),
 }
 
 impl ClientMessage {
     /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
     pub fn is_write(&self) -> bool {
-        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_))
+        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_))
     }
 }
 
@@ -124,6 +130,12 @@ pub enum ServerMessage {
     PushRemoveResult(PushRemoveResult),
     #[serde(rename = "push.update_muted.result")]
     PushUpdateMutedResult(PushUpdateMutedResult),
+    #[serde(rename = "host_service.status.result")]
+    HostServiceStatusResult(HostServiceStatusResult),
+    #[serde(rename = "host_service.update.result")]
+    HostServiceUpdateResult(HostServiceUpdateResult),
+    #[serde(rename = "host_service.set_auto_update.result")]
+    HostServiceSetAutoUpdateResult(HostServiceSetAutoUpdateResult),
     #[serde(rename = "error")]
     ErrorMessage(ErrorMessage),
 }
@@ -721,6 +733,84 @@ pub struct PushUpdateMutedResult {
     pub other_devices: i64,
 }
 
+/// 從 app 管理主機服務(raychiutw/purrdr.host#18):查已安裝版本、最新版本(問 Release 來源)、自動更新開關、上次檢查或更新的結果與退回過的版本。唯讀，唯讀裝置也可用。沒有安裝(開發中直接執行)時回 host_service_not_installed。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceStatus {
+    pub request_id: String,
+}
+
+/// 主機服務的更新狀態(同主機上的 update --check 與 version)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceStatusResult {
+    pub request_id: String,
+    /// 安裝好的執行檔回報的版本;更新後重啟前可能比 welcome 的 host_service_version 新。
+    pub installed_version: String,
+    /// Release 來源的最新版本;取不到時沒有這欄，改帶 latest_error。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    /// 取不到最新版本的原因(給開發者看)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_error: Option<String>,
+    /// 最新版本比已安裝的大(只往更大的版本更新)。
+    pub update_available: bool,
+    /// 安裝紀錄的自動更新開關。
+    pub auto_update: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update: Option<HostServiceUpdateRecord>,
+    /// 上次更新後起不來、已換回舊版的版本;背景自動更新不再重試它，host_service.update 仍會再試。更新成功後清掉。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rolled_back: Option<String>,
+}
+
+/// 上一次檢查或更新的時間與結果(update.json)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceUpdateRecord {
+    /// RFC 3339(UTC,到秒)。
+    pub checked_at: String,
+    /// 主機上 version 顯示的同一句話，例如 updated 0.5.0 -> 0.5.1、update failed: …(給人看，不解析)。
+    pub result: String,
+}
+
+/// 立即更新：有更大的版本就以獨立程序執行安裝好的 update --yes(與主機上手動更新同一條流程：update.lock、核對 SHA256SUMS、起不來就換回),回應在重啟前送出。主機服務接著重啟、連線中斷，app 重新連線後以 welcome 的 host_service_version 確認結果，失敗退回時 host_service.status 看得到 rolled_back 與 last_update。已有更新在進行回 update_in_progress;取不到最新版本或啟動不了更新程序回 update_failed。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceUpdate {
+    pub request_id: String,
+}
+
+/// started:更新程序已啟動，from_version → to_version;up_to_date:已是最新，沒有更新(不重啟)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceUpdateResult {
+    pub request_id: String,
+    pub outcome: HostServiceUpdateOutcome,
+    /// 已安裝的版本。
+    pub from_version: String,
+    /// 最新版本(started 時是要更新到的版本)。
+    pub to_version: String,
+}
+
+/// 立即更新的結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum HostServiceUpdateOutcome {
+    #[serde(rename = "started")]
+    Started,
+    #[serde(rename = "up_to_date")]
+    UpToDate,
+}
+
+/// 開關背景自動更新(同主機上的 auto-update on|off,改安裝紀錄的 auto_update);背景服務下一次檢查時就照新的設定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceSetAutoUpdate {
+    pub request_id: String,
+    pub enabled: bool,
+}
+
+/// 已改好，帶改完後的開關。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostServiceSetAutoUpdateResult {
+    pub request_id: String,
+    pub auto_update: bool,
+}
+
 /// POST /v1/pair 的本文：以配對碼換裝置權杖。QR code 的內容是 purrdr://pair?address=<HTTPS 位址>&code=<配對碼>。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairRequest {
@@ -755,7 +845,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
@@ -798,6 +888,12 @@ pub enum ErrorCode {
     PushPluginFailed,
     #[serde(rename = "push_not_paired")]
     PushNotPaired,
+    #[serde(rename = "host_service_not_installed")]
+    HostServiceNotInstalled,
+    #[serde(rename = "update_in_progress")]
+    UpdateInProgress,
+    #[serde(rename = "update_failed")]
+    UpdateFailed,
     #[serde(rename = "internal_error")]
     InternalError,
 }

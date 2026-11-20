@@ -30,6 +30,7 @@ use crate::protocol::{
     TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
+use crate::remote_management::{ManagementRequest, ServiceManagement};
 use crate::transcript::AgentSessionInfo;
 use crate::transcript_session::TranscriptSession;
 
@@ -86,6 +87,7 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         file_pacing: RequestPacing::default(),
         file_snapshot: None,
         push: context.push.clone(),
+        service_management: context.service_management.clone(),
     };
     let handler = tokio::spawn(handle_requests(connection, request_queue, context, device_token));
     // 逾時沒收到任何 frame(含 pong)就當作 app 已經不在。
@@ -216,6 +218,7 @@ struct ClientConnection {
     /// 主機取檔最近一次從頭讀的快照。
     file_snapshot: Option<FileSnapshot>,
     push: PushPlugin,
+    service_management: Option<ServiceManagement>,
 }
 
 impl Drop for ClientConnection {
@@ -325,6 +328,15 @@ impl ClientConnection {
                 push_reply(request.request_id, outcome, PushState::muted_result)
             }
             ClientMessage::PushRemove(request) => push_reply(request.request_id, self.push.unpair(&request.device_id).await, PushState::unpaired_result),
+            ClientMessage::HostServiceStatus(request) => self.manage(ManagementRequest::Status(request.request_id)).await,
+            ClientMessage::HostServiceUpdate(request) => self.manage(ManagementRequest::Update(request.request_id)).await,
+            ClientMessage::HostServiceSetAutoUpdate(request) => {
+                self.manage(ManagementRequest::SetAutoUpdate {
+                    request_id: request.request_id,
+                    enabled: request.enabled,
+                })
+                .await
+            }
             ClientMessage::PaneTerminalClose(close) => {
                 // drop:關閉 stdin(control 等同 release)並結束子行程。
                 self.terminals.remove(&close.stream_id);
@@ -332,6 +344,13 @@ impl ClientConnection {
             }
         };
         Some(reply)
+    }
+
+    async fn manage(&self, request: ManagementRequest) -> ServerMessage {
+        if !self.handshaken {
+            return error(Some(request.request_id().to_owned()), ErrorCode::HandshakeRequired, "send hello first");
+        }
+        crate::remote_management::reply(self.service_management.clone(), request).await
     }
 
     /// 開著的 Pane 終端機;已關閉或不存在時略過那個訊息。

@@ -41,6 +41,9 @@ extension HostServiceProtocol {
         case pushInstall(PushInstall)
         case pushRemove(PushRemove)
         case pushUpdateMuted(PushUpdateMuted)
+        case hostServiceStatus(HostServiceStatus)
+        case hostServiceUpdate(HostServiceUpdate)
+        case hostServiceSetAutoUpdate(HostServiceSetAutoUpdate)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -72,6 +75,9 @@ extension HostServiceProtocol {
             case "push.install": self = .pushInstall(try PushInstall(from: decoder))
             case "push.remove": self = .pushRemove(try PushRemove(from: decoder))
             case "push.update_muted": self = .pushUpdateMuted(try PushUpdateMuted(from: decoder))
+            case "host_service.status": self = .hostServiceStatus(try HostServiceStatus(from: decoder))
+            case "host_service.update": self = .hostServiceUpdate(try HostServiceUpdate(from: decoder))
+            case "host_service.set_auto_update": self = .hostServiceSetAutoUpdate(try HostServiceSetAutoUpdate(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -146,13 +152,22 @@ extension HostServiceProtocol {
             case .pushUpdateMuted(let message):
                 try container.encode("push.update_muted", forKey: .type)
                 try message.encode(to: encoder)
+            case .hostServiceStatus(let message):
+                try container.encode("host_service.status", forKey: .type)
+                try message.encode(to: encoder)
+            case .hostServiceUpdate(let message):
+                try container.encode("host_service.update", forKey: .type)
+                try message.encode(to: encoder)
+            case .hostServiceSetAutoUpdate(let message):
+                try container.encode("host_service.set_auto_update", forKey: .type)
+                try message.encode(to: encoder)
             }
         }
 
         /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
         public var isWrite: Bool {
             switch self {
-            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove, .pushUpdateMuted: return true
+            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove, .pushUpdateMuted, .hostServiceUpdate, .hostServiceSetAutoUpdate: return true
             default: return false
             }
         }
@@ -185,6 +200,9 @@ extension HostServiceProtocol {
         case pushInstallResult(PushInstallResult)
         case pushRemoveResult(PushRemoveResult)
         case pushUpdateMutedResult(PushUpdateMutedResult)
+        case hostServiceStatusResult(HostServiceStatusResult)
+        case hostServiceUpdateResult(HostServiceUpdateResult)
+        case hostServiceSetAutoUpdateResult(HostServiceSetAutoUpdateResult)
         case errorMessage(ErrorMessage)
 
         private enum TypeKey: String, CodingKey {
@@ -218,6 +236,9 @@ extension HostServiceProtocol {
             case "push.install.result": self = .pushInstallResult(try PushInstallResult(from: decoder))
             case "push.remove.result": self = .pushRemoveResult(try PushRemoveResult(from: decoder))
             case "push.update_muted.result": self = .pushUpdateMutedResult(try PushUpdateMutedResult(from: decoder))
+            case "host_service.status.result": self = .hostServiceStatusResult(try HostServiceStatusResult(from: decoder))
+            case "host_service.update.result": self = .hostServiceUpdateResult(try HostServiceUpdateResult(from: decoder))
+            case "host_service.set_auto_update.result": self = .hostServiceSetAutoUpdateResult(try HostServiceSetAutoUpdateResult(from: decoder))
             case "error": self = .errorMessage(try ErrorMessage(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
@@ -295,6 +316,15 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .pushUpdateMutedResult(let message):
                 try container.encode("push.update_muted.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .hostServiceStatusResult(let message):
+                try container.encode("host_service.status.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .hostServiceUpdateResult(let message):
+                try container.encode("host_service.update.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .hostServiceSetAutoUpdateResult(let message):
+                try container.encode("host_service.set_auto_update.result", forKey: .type)
                 try message.encode(to: encoder)
             case .errorMessage(let message):
                 try container.encode("error", forKey: .type)
@@ -1585,6 +1615,168 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
+    /// 從 app 管理主機服務(raychiutw/purrdr.host#18):查已安裝版本、最新版本(問 Release 來源)、自動更新開關、上次檢查或更新的結果與退回過的版本。唯讀，唯讀裝置也可用。沒有安裝(開發中直接執行)時回 host_service_not_installed。
+    public struct HostServiceStatus: Codable, Sendable, Equatable {
+        public var requestId: String
+
+        public init(requestId: String) {
+            self.requestId = requestId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 主機服務的更新狀態(同主機上的 update --check 與 version)。
+    public struct HostServiceStatusResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        /// 安裝好的執行檔回報的版本;更新後重啟前可能比 welcome 的 host_service_version 新。
+        public var installedVersion: String
+        /// Release 來源的最新版本;取不到時沒有這欄，改帶 latest_error。
+        public var latestVersion: String?
+        /// 取不到最新版本的原因(給開發者看)。
+        public var latestError: String?
+        /// 最新版本比已安裝的大(只往更大的版本更新)。
+        public var updateAvailable: Bool
+        /// 安裝紀錄的自動更新開關。
+        public var autoUpdate: Bool
+        public var lastUpdate: HostServiceUpdateRecord?
+        /// 上次更新後起不來、已換回舊版的版本;背景自動更新不再重試它，host_service.update 仍會再試。更新成功後清掉。
+        public var rolledBack: String?
+
+        public init(requestId: String, installedVersion: String, latestVersion: String? = nil, latestError: String? = nil, updateAvailable: Bool, autoUpdate: Bool, lastUpdate: HostServiceUpdateRecord? = nil, rolledBack: String? = nil) {
+            self.requestId = requestId
+            self.installedVersion = installedVersion
+            self.latestVersion = latestVersion
+            self.latestError = latestError
+            self.updateAvailable = updateAvailable
+            self.autoUpdate = autoUpdate
+            self.lastUpdate = lastUpdate
+            self.rolledBack = rolledBack
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case installedVersion = "installed_version"
+            case latestVersion = "latest_version"
+            case latestError = "latest_error"
+            case updateAvailable = "update_available"
+            case autoUpdate = "auto_update"
+            case lastUpdate = "last_update"
+            case rolledBack = "rolled_back"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 上一次檢查或更新的時間與結果(update.json)。
+    public struct HostServiceUpdateRecord: Codable, Sendable, Equatable {
+        /// RFC 3339(UTC,到秒)。
+        public var checkedAt: String
+        /// 主機上 version 顯示的同一句話，例如 updated 0.5.0 -> 0.5.1、update failed: …(給人看，不解析)。
+        public var result: String
+
+        public init(checkedAt: String, result: String) {
+            self.checkedAt = checkedAt
+            self.result = result
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case checkedAt = "checked_at"
+            case result
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 立即更新：有更大的版本就以獨立程序執行安裝好的 update --yes(與主機上手動更新同一條流程：update.lock、核對 SHA256SUMS、起不來就換回),回應在重啟前送出。主機服務接著重啟、連線中斷，app 重新連線後以 welcome 的 host_service_version 確認結果，失敗退回時 host_service.status 看得到 rolled_back 與 last_update。已有更新在進行回 update_in_progress;取不到最新版本或啟動不了更新程序回 update_failed。
+    public struct HostServiceUpdate: Codable, Sendable, Equatable {
+        public var requestId: String
+
+        public init(requestId: String) {
+            self.requestId = requestId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// started:更新程序已啟動，from_version → to_version;up_to_date:已是最新，沒有更新(不重啟)。
+    public struct HostServiceUpdateResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var outcome: HostServiceUpdateOutcome
+        /// 已安裝的版本。
+        public var fromVersion: String
+        /// 最新版本(started 時是要更新到的版本)。
+        public var toVersion: String
+
+        public init(requestId: String, outcome: HostServiceUpdateOutcome, fromVersion: String, toVersion: String) {
+            self.requestId = requestId
+            self.outcome = outcome
+            self.fromVersion = fromVersion
+            self.toVersion = toVersion
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case outcome
+            case fromVersion = "from_version"
+            case toVersion = "to_version"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 立即更新的結果。
+    public enum HostServiceUpdateOutcome: String, Codable, Sendable, CaseIterable {
+        case started
+        case upToDate = "up_to_date"
+    }
+}
+
+extension HostServiceProtocol {
+    /// 開關背景自動更新(同主機上的 auto-update on|off,改安裝紀錄的 auto_update);背景服務下一次檢查時就照新的設定。
+    public struct HostServiceSetAutoUpdate: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var enabled: Bool
+
+        public init(requestId: String, enabled: Bool) {
+            self.requestId = requestId
+            self.enabled = enabled
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case enabled
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 已改好，帶改完後的開關。
+    public struct HostServiceSetAutoUpdateResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var autoUpdate: Bool
+
+        public init(requestId: String, autoUpdate: Bool) {
+            self.requestId = requestId
+            self.autoUpdate = autoUpdate
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case autoUpdate = "auto_update"
+        }
+    }
+}
+
+extension HostServiceProtocol {
     /// POST /v1/pair 的本文：以配對碼換裝置權杖。QR code 的內容是 purrdr://pair?address=<HTTPS 位址>&code=<配對碼>。
     public struct PairRequest: Codable, Sendable, Equatable {
         /// 大小寫與連字號不拘，例如 K7QM-2XPA。
@@ -1657,7 +1849,7 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
     public enum ErrorCode: String, Codable, Sendable, CaseIterable {
         case invalidMessage = "invalid_message"
         case handshakeRequired = "handshake_required"
@@ -1679,6 +1871,9 @@ extension HostServiceProtocol {
         case fileChanged = "file_changed"
         case pushPluginFailed = "push_plugin_failed"
         case pushNotPaired = "push_not_paired"
+        case hostServiceNotInstalled = "host_service_not_installed"
+        case updateInProgress = "update_in_progress"
+        case updateFailed = "update_failed"
         case internalError = "internal_error"
     }
 }
