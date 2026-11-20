@@ -7,7 +7,7 @@
 [Purrdr](https://github.com/raychiutw/purrdr.ios) 的主機端元件：讓 iPhone／iPad 上的 Purrdr app 經 HTTPS(Tailscale)連到電腦上由 [herdr](https://herdr.dev) 管理的 coding agent。
 
 - **主機服務**(`host-service/`):在電腦上執行的常駐程式，只聽 127.0.0.1,由 `tailscale serve` 對 tailnet 提供 HTTPS。支援 macOS、Linux、Windows。
-- **主機外掛**(`host-plugin/`):herdr plugin,Agent 需要你時推播到配對的裝置(由 app 經 SSH 安裝)。
+- **主機外掛**(`host-plugin/`):herdr plugin,Agent 需要你或完成時推播到配對的裝置(由 app 經 SSH 安裝)。
 - **協定**(`protocol/`):app 與主機服務之間的協定定義。
 
 ### 安裝主機服務
