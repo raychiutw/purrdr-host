@@ -415,6 +415,8 @@ pub async fn start_service_with_management(herdr_socket: HerdrSocket, service_ma
     .await
 }
 
+// 測試內部的組合點：各個 start_service_* 只是挑不同的參數組合呼叫它。
+#[allow(clippy::too_many_arguments)]
 async fn start_service_with_options(
     herdr_socket: HerdrSocket,
     herdr_cli: HerdrCli,

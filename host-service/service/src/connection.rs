@@ -595,27 +595,27 @@ impl ClientConnection {
     }
 
     /// git.status／git.diff 只讀 herdr 目前回報的 Agent 工作目錄。Err 是要回的錯誤。
-    async fn reported_working_directory(&self, request_id: &str, cwd: &str) -> Result<PathBuf, ServerMessage> {
+    async fn reported_working_directory(&self, request_id: &str, cwd: &str) -> Result<PathBuf, Box<ServerMessage>> {
         let result = match self.herdr.request("session.snapshot", json!({})).await {
             Ok(result) => result,
-            Err(failure) => return Err(herdr_error(request_id.to_owned(), "session.snapshot", failure)),
+            Err(failure) => return Err(Box::new(herdr_error(request_id.to_owned(), "session.snapshot", failure))),
         };
         let snapshot = serde_json::from_value::<SnapshotResult>(result).unwrap_or_default().snapshot;
         if snapshot.agents.iter().any(|agent| agent.cwd.as_deref() == Some(cwd)) {
             Ok(PathBuf::from(cwd))
         } else {
-            Err(error(
+            Err(Box::new(error(
                 Some(request_id.to_owned()),
                 ErrorCode::CwdNotAllowed,
                 "cwd is not the working directory of an agent herdr reports",
-            ))
+            )))
         }
     }
 
     async fn git_status(&self, request: GitStatus) -> ServerMessage {
         let cwd = match self.reported_working_directory(&request.request_id, &request.cwd).await {
             Ok(cwd) => cwd,
-            Err(reply) => return reply,
+            Err(reply) => return *reply,
         };
         match blocking(move || git_changes::status(&cwd)).await {
             Ok(changes) => ServerMessage::GitStatusResult(GitStatusResult {
@@ -630,7 +630,7 @@ impl ClientConnection {
     async fn git_diff(&self, request: GitDiff) -> ServerMessage {
         let cwd = match self.reported_working_directory(&request.request_id, &request.cwd).await {
             Ok(cwd) => cwd,
-            Err(reply) => return reply,
+            Err(reply) => return *reply,
         };
         let only = request.path.clone();
         match blocking(move || git_changes::diff(&cwd, only.as_deref())).await {
