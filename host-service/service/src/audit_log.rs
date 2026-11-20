@@ -32,6 +32,9 @@ pub enum AuditEvent {
     Revoked {
         device_id: String,
         by: RevokedBy,
+        /// `by` 是 `app` 時，發出撤銷的裝置。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        by_device_id: Option<String>,
     },
     Write {
         device_id: String,
@@ -67,6 +70,8 @@ pub enum RevokedBy {
     Host,
     /// 裝置自己(app 刪除主機時)。
     Device,
+    /// 某支裝置的 app 以 devices.revoke 撤銷。
+    App,
 }
 
 #[derive(Serialize)]

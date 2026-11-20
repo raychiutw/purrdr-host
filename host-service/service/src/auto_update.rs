@@ -3,6 +3,8 @@
 use std::future::Future;
 use std::time::Duration;
 
+use crate::agent_activity::HerdrAgentActivity;
+use crate::herdr_socket::HerdrSocket;
 use crate::install::InstalledService;
 use crate::install::system::ProcessHostSystem;
 use crate::update::{AutomaticOutcome, HttpReleaseSource, UpdateError, Updater};
@@ -38,19 +40,22 @@ where
     }
 }
 
-/// 執行中的是安裝好的主機服務時，在背景開始自動更新排程。
-pub fn spawn_for_installed_service() -> Option<tokio::task::JoinHandle<()>> {
+/// 執行中的是安裝好的主機服務時，在背景開始自動更新排程(`herdr_socket` 用來看 Agent 是否工作中)。
+pub fn spawn_for_installed_service(herdr_socket: HerdrSocket) -> Option<tokio::task::JoinHandle<()>> {
     let environment = crate::install::HostEnvironment::from_process().ok()?;
     if !InstalledService::new(environment.clone(), ProcessHostSystem).runs_installed_copy() {
         return None;
     }
     let check = move || {
         let environment = environment.clone();
+        let herdr_socket = herdr_socket.clone();
+        let runtime = tokio::runtime::Handle::current();
         async move {
             let checked = tokio::task::spawn_blocking(move || {
                 let location = InstalledService::new(environment, ProcessHostSystem);
                 let mut launcher = location.update_launcher();
-                Updater::new(HttpReleaseSource::from_environment(), location).automatic(&mut launcher)
+                let mut agents = HerdrAgentActivity::new(herdr_socket, runtime);
+                Updater::new(HttpReleaseSource::from_environment(), location).automatic(&mut launcher, &mut agents)
             })
             .await;
             let outcome = checked.unwrap_or_else(|error| AutomaticOutcome::Failed(UpdateError::Io(error.to_string())));
