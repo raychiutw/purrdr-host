@@ -14,7 +14,7 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let herdr_socket = config.herdr_socket.native_name();
+    let herdr_socket = config.herdr_socket.clone();
     let state_directory = config.state_directory.clone();
     let service = match crate::start(config).await {
         Ok(service) => service,
@@ -24,15 +24,16 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
         }
     };
     println!(
-        "purrdr-host-service {} listening on http://{} (WebSocket {WEBSOCKET_PATH}, herdr socket {herdr_socket})",
+        "purrdr-host-service {} listening on http://{} (WebSocket {WEBSOCKET_PATH}, herdr socket {})",
         env!("CARGO_PKG_VERSION"),
-        service.local_addr()
+        service.local_addr(),
+        herdr_socket.native_name()
     );
     if let Err(error) = crate::running_service::write(&state_directory, service.local_addr().port()) {
         eprintln!("cannot write running.json: {error}");
     }
     // 安裝好的那份才會自動更新(開發中直接執行的不會)。
-    let _auto_update = crate::auto_update::spawn_for_installed_service();
+    let _auto_update = crate::auto_update::spawn_for_installed_service(herdr_socket);
     service.wait().await;
     ExitCode::SUCCESS
 }

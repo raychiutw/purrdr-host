@@ -47,7 +47,9 @@
         { "$ref": "#/$defs/PushStatus" },
         { "$ref": "#/$defs/PushInstall" },
         { "$ref": "#/$defs/PushRemove" },
-        { "$ref": "#/$defs/PushUpdateMuted" }
+        { "$ref": "#/$defs/PushUpdateMuted" },
+        { "$ref": "#/$defs/DevicesList" },
+        { "$ref": "#/$defs/DevicesRevoke" }
       ]
     },
     "ServerMessage": {
@@ -76,6 +78,8 @@
         { "$ref": "#/$defs/PushInstallResult" },
         { "$ref": "#/$defs/PushRemoveResult" },
         { "$ref": "#/$defs/PushUpdateMutedResult" },
+        { "$ref": "#/$defs/DevicesListResult" },
+        { "$ref": "#/$defs/DevicesRevokeResult" },
         { "$ref": "#/$defs/ErrorMessage" }
       ]
     },
@@ -720,6 +724,59 @@
       },
       "required": ["type", "request_id", "plugin_installed", "paired", "other_devices"]
     },
+    "DevicesList": {
+      "description": "列出這台主機已配對的裝置(raychiutw/purrdr.host#19;不含已撤銷的)。唯讀，唯讀裝置也可用。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "devices.list" },
+        "request_id": { "type": "string" }
+      },
+      "required": ["type", "request_id"]
+    },
+    "DevicesListResult": {
+      "description": "已配對的裝置，依配對先後。不含權杖或其雜湊。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "devices.list.result" },
+        "request_id": { "type": "string" },
+        "devices": { "type": "array", "items": { "$ref": "#/$defs/PairedDevice" } }
+      },
+      "required": ["type", "request_id", "devices"]
+    },
+    "PairedDevice": {
+      "description": "一支已配對的裝置。時間是 RFC 3339 UTC(到秒)。",
+      "type": "object",
+      "properties": {
+        "device_id": { "type": "string" },
+        "name": { "type": "string", "description": "配對時 app 給的裝置名稱。" },
+        "read_only": { "type": "boolean" },
+        "paired_at": { "type": "string" },
+        "last_connected_at": { "type": "string", "description": "最後一次 WSS 連線的時間;還沒連過就沒有這欄。" },
+        "current": { "type": "boolean", "description": "是發出這個請求的裝置。" }
+      },
+      "required": ["device_id", "name", "read_only", "paired_at", "current"]
+    },
+    "DevicesRevoke": {
+      "description": "撤銷一支已配對的裝置：之後它的每個 WSS 訊息都以 device_token_revoked 與 close code 4401 拒絕。已撤銷的再撤銷一次也成功;不認得的 device_id 回 device_unknown。",
+      "type": "object",
+      "x-write": true,
+      "properties": {
+        "type": { "const": "devices.revoke" },
+        "request_id": { "type": "string" },
+        "device_id": { "type": "string", "description": "devices.list.result 裡的 device_id。" }
+      },
+      "required": ["type", "request_id", "device_id"]
+    },
+    "DevicesRevokeResult": {
+      "description": "已撤銷。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "devices.revoke.result" },
+        "request_id": { "type": "string" },
+        "device_id": { "type": "string" }
+      },
+      "required": ["type", "request_id", "device_id"]
+    },
     "PairRequest": {
       "description": "POST /v1/pair 的本文：以配對碼換裝置權杖。QR code 的內容是 purrdr://pair?address=<HTTPS 位址>&code=<配對碼>。",
       "type": "object",
@@ -757,7 +814,7 @@
       "required": ["type", "code", "message"]
     },
     "ErrorCode": {
-      "description": "錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。",
+      "description": "錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。",
       "type": "string",
       "enum": [
         "invalid_message",
@@ -780,6 +837,7 @@
         "file_changed",
         "push_plugin_failed",
         "push_not_paired",
+        "device_unknown",
         "internal_error"
       ]
     }

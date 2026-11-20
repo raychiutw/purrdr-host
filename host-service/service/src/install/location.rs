@@ -287,6 +287,23 @@ impl<S: HostSystem> InstallLocation for InstalledService<S> {
         self.write_update_status(&status);
     }
 
+    fn deferred_updates(&mut self) -> u32 {
+        self.update_status()
+            .get("deferred_count")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0, |count| count.try_into().unwrap_or(u32::MAX))
+    }
+
+    /// 0 時移除欄位。
+    fn set_deferred_updates(&mut self, count: u32) {
+        let mut status = self.update_status();
+        match count {
+            0 => status.remove("deferred_count"),
+            count => status.insert("deferred_count".into(), count.into()),
+        };
+        self.write_update_status(&status);
+    }
+
     /// 就地重啟(不取消登記)。執行中的服務寫的 `running.json` 回報 `expected`、且在這次重啟之後啟動，才算成功。
     fn restart(&mut self, expected: &Version) -> Result<(), UpdateError> {
         let record = self.record()?;

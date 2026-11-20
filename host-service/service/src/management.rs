@@ -168,6 +168,7 @@ fn revoke(state_directory: &Path, device_id: &str, now: SystemTime) -> Result<St
                 AuditEvent::Revoked {
                     device_id: device.device_id.clone(),
                     by: RevokedBy::Host,
+                    by_device_id: None,
                 },
                 now,
             );
