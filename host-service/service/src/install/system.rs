@@ -64,10 +64,36 @@ pub fn spawn_update_helper(executable: &Path, systemd_run: &str) -> std::io::Res
         // 隱藏的 console 讓它執行的 taskkill 不會跳出視窗。
         command.creation_flags(windows_flags::CREATE_NO_WINDOW | windows_flags::CREATE_NEW_PROCESS_GROUP);
     }
+    #[cfg(windows)]
+    standard_handles::stop_inheriting();
     let mut child = command.spawn()?;
     // 收掉結束的子程序(服務沒被重啟時)。
     std::thread::spawn(move || child.wait());
     Ok(())
+}
+
+/// Windows 的 `CreateProcess` 由 Rust 以「繼承所有可繼承的 handle」呼叫(stable 沒有關掉的方法),
+/// 所以背景程式會連呼叫端給這個行程的標準 handle(例如 `update --yes 2>&1 | tail` 的管線)一起繼承，
+/// 讓管線在 update 結束後仍沒有 EOF(raychiutw/purrdr.host#35)。背景啟動前把自己的標準 handle 設成不可繼承;
+/// 之後以 `Stdio::inherit` 執行的程式不受影響(Rust 會另外複製一份可繼承的給它)。
+#[cfg(windows)]
+mod standard_handles {
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+
+    #[allow(unsafe_code)]
+    pub fn stop_inheriting() {
+        for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: GetStdHandle 只讀這個行程的標準 handle(沒有時是 null 或 INVALID_HANDLE_VALUE,不轉移所有權);
+            // SetHandleInformation 只清掉該 handle 的繼承旗標，不關閉、不改變它指向的物件。失敗時維持原狀(最差是原本的行為)。
+            unsafe {
+                let handle = GetStdHandle(which);
+                if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                    SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -98,6 +124,7 @@ impl HostSystem for ProcessHostSystem {
         {
             use std::os::windows::process::CommandExt;
             command.creation_flags(windows_flags::DETACHED_PROCESS | windows_flags::CREATE_NEW_PROCESS_GROUP);
+            standard_handles::stop_inheriting();
         }
         command.spawn().map(drop)
     }

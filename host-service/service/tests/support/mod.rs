@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use futures_util::{SinkExt, StreamExt};
+use purrdr_host_service::agent_observer::ObserverOptions;
 use purrdr_host_service::device_store::{DeviceStore, IssuedDevice};
 use purrdr_host_service::herdr_cli::HerdrCli;
 use purrdr_host_service::herdr_socket::{HerdrSocket, Platform};
@@ -64,7 +65,7 @@ pub struct FakeHerdr {
 
 struct FakeHerdrState {
     /// method → (回應, 回應前等多久)。
-    replies: HashMap<String, (Value, Duration)>,
+    replies: Mutex<HashMap<String, (Value, Duration)>>,
     requests: Mutex<Vec<Value>>,
     subscriptions: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<Push>>>,
 }
@@ -85,12 +86,17 @@ impl FakeHerdr {
     pub async fn start_delayed(replies: Vec<(&str, Value, Duration)>) -> FakeHerdr {
         let socket = unique_socket();
         let shared = Arc::new(FakeHerdrState {
-            replies: replies.into_iter().map(|(method, reply, delay)| (method.to_owned(), (reply, delay))).collect(),
+            replies: Mutex::new(replies.into_iter().map(|(method, reply, delay)| (method.to_owned(), (reply, delay))).collect()),
             requests: Mutex::new(Vec::new()),
             subscriptions: Mutex::new(Vec::new()),
         });
         listen(&socket, shared.clone());
         FakeHerdr { socket, shared }
+    }
+
+    /// 之後的 `method` 請求改回 `reply`(模擬 herdr 的狀態在測試中途改變)。
+    pub fn set_reply(&self, method: &str, reply: Value) {
+        self.shared.replies.lock().unwrap().insert(method.to_owned(), (reply, Duration::ZERO));
     }
 
     /// 收到的請求(整行 JSON),依收到順序。
@@ -160,11 +166,11 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(stream: S, shared: 
                 line.clear();
                 shared.requests.lock().unwrap().push(request.clone());
                 let method = request["method"].as_str().unwrap_or_default();
-                let Some((reply, delay)) = shared.replies.get(method) else {
+                let Some((reply, delay)) = shared.replies.lock().unwrap().get(method).cloned() else {
                     return;
                 };
-                tokio::time::sleep(*delay).await;
-                let mut reply = reply.clone();
+                tokio::time::sleep(delay).await;
+                let mut reply = reply;
                 reply["id"] = request["id"].clone();
                 write_line(&mut writing, &reply).await;
                 if method == "events.subscribe"
@@ -390,12 +396,13 @@ pub async fn start_file_service(herdr_socket: HerdrSocket, options: FileServiceO
         options.temporary_directory,
         options.state_directory,
         None,
+        None,
     )
     .await
 }
 
 async fn start_service_with(herdr_socket: HerdrSocket, herdr_cli: HerdrCli, heartbeat: Heartbeat, transcripts: TranscriptEnvironment) -> TestHostService {
-    start_service_with_options(herdr_socket, herdr_cli, heartbeat, transcripts, None, None, None).await
+    start_service_with_options(herdr_socket, herdr_cli, heartbeat, transcripts, None, None, None, None).await
 }
 
 /// 從 app 管理主機服務的測試：指定安裝位置(暫存家目錄加假系統);None 代表不是安裝好的那份。
@@ -408,10 +415,13 @@ pub async fn start_service_with_management(herdr_socket: HerdrSocket, service_ma
         None,
         None,
         service_management,
+        None,
     )
     .await
 }
 
+// 測試內部的組合點：各個 start_service_* 只是挑不同的參數組合呼叫它。
+#[allow(clippy::too_many_arguments)]
 async fn start_service_with_options(
     herdr_socket: HerdrSocket,
     herdr_cli: HerdrCli,
@@ -420,6 +430,7 @@ async fn start_service_with_options(
     temporary_directory: Option<PathBuf>,
     state_directory: Option<PathBuf>,
     service_management: Option<ServiceManagement>,
+    observer: Option<ObserverOptions>,
 ) -> TestHostService {
     let state_root = tempfile::tempdir().unwrap();
     let state_path = state_directory.unwrap_or_else(|| state_root.path().to_owned());
@@ -432,6 +443,7 @@ async fn start_service_with_options(
         transcripts,
         temporary_directory,
         service_management,
+        observer,
     })
     .await
     .expect("啟動主機服務");
@@ -472,4 +484,27 @@ pub async fn http_request(service: &TestHostService, method: &str, path: &str, d
         serde_json::from_str(body).unwrap_or(Value::String(body.to_owned()))
     };
     (status, body)
+}
+
+/// 同 `start_service`,另外啟動常駐的 Agent 觀察者;`state_directory` 給定時用它(重啟測試),`home` 是推播配對所在的家目錄。
+pub async fn start_service_with_observer(
+    herdr_socket: HerdrSocket,
+    state_directory: Option<PathBuf>,
+    home: Option<PathBuf>,
+    observer: ObserverOptions,
+) -> TestHostService {
+    start_service_with_options(
+        herdr_socket,
+        HerdrCli::search(None),
+        Heartbeat::default(),
+        TranscriptEnvironment {
+            home,
+            ..TranscriptEnvironment::default()
+        },
+        None,
+        state_directory,
+        None,
+        Some(observer),
+    )
+    .await
 }

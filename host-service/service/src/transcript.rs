@@ -93,8 +93,8 @@ fn is_safe_reported_path(path: &str) -> bool {
 
 /// `${CODEX_HOME:-~/.codex}` 的 sessions 與 archived_sessions 下的 `rollout-*-<id>.jsonl`(含倒帶的 `_<rolloutId>`,§4.2)。
 /// 不只一個時不猜(SSH 路線會問 Codex 的狀態資料庫;主機服務不執行指令，所以回有歧義)。
-fn locate_codex(environment: &TranscriptEnvironment, session_id: &str) -> Result<PathBuf, TranscriptFailure> {
-    let codex_home = environment.codex_home.clone().unwrap_or_else(|| home_relative(environment, &[".codex"]));
+pub(crate) fn locate_codex(environment: &TranscriptEnvironment, session_id: &str) -> Result<PathBuf, TranscriptFailure> {
+    let codex_home = codex_home(environment);
     let mut rollouts = Vec::new();
     let mut compressed = false;
     for folder in ["sessions", "archived_sessions"] {
@@ -120,7 +120,7 @@ fn locate_codex(environment: &TranscriptEnvironment, session_id: &str) -> Result
 }
 
 /// Codex 依日期分層(`年/月/日`),再多留一層餘裕。
-const CODEX_SEARCH_DEPTH: usize = 5;
+pub(crate) const CODEX_SEARCH_DEPTH: usize = 5;
 
 /// `rollout-…-<id><extension>` 或 `rollout-…-<id>_<rolloutId><extension>`。
 fn is_codex_rollout(name: &str, session_id: &str, extension: &str) -> bool {
@@ -135,7 +135,7 @@ fn is_codex_rollout(name: &str, session_id: &str, extension: &str) -> bool {
 }
 
 /// 資料夾下的檔案(不跟隨符號連結)。
-fn collect_files(folder: &Path, depth: usize, files: &mut Vec<PathBuf>) {
+pub(crate) fn collect_files(folder: &Path, depth: usize, files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return;
     };
@@ -695,7 +695,7 @@ pub fn header_lines(path: &Path) -> Result<Vec<String>, TranscriptFailure> {
 }
 
 /// session id 只能含英數與 `-`(行為規格 §4.0、R-I12)。
-fn require_safe_id(id: &str) -> Result<(), TranscriptFailure> {
+pub(crate) fn require_safe_id(id: &str) -> Result<(), TranscriptFailure> {
     let safe = !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
     if safe { Ok(()) } else { Err(TranscriptFailure::NotAllowed) }
 }
@@ -709,13 +709,23 @@ fn joined(base: &Path, components: &[&str]) -> PathBuf {
     components.iter().fold(base.to_owned(), |path, component| path.join(component))
 }
 
-/// `<設定目錄>/projects/<cwd 轉成的資料夾名>/<id>.jsonl`;不在時找其他專案資料夾的同名檔(worktree,§4.1)。
-fn locate_claude(environment: &TranscriptEnvironment, session_id: &str, cwd: &str) -> PathBuf {
-    let projects = environment
+/// `${CLAUDE_CONFIG_DIR:-~/.claude}/projects`。
+pub(crate) fn claude_projects(environment: &TranscriptEnvironment) -> PathBuf {
+    environment
         .claude_config_dir
         .clone()
         .unwrap_or_else(|| home_relative(environment, &[".claude"]))
-        .join("projects");
+        .join("projects")
+}
+
+/// `${CODEX_HOME:-~/.codex}`。
+pub(crate) fn codex_home(environment: &TranscriptEnvironment) -> PathBuf {
+    environment.codex_home.clone().unwrap_or_else(|| home_relative(environment, &[".codex"]))
+}
+
+/// `<設定目錄>/projects/<cwd 轉成的資料夾名>/<id>.jsonl`;不在時找其他專案資料夾的同名檔(worktree,§4.1)。
+pub(crate) fn locate_claude(environment: &TranscriptEnvironment, session_id: &str, cwd: &str) -> PathBuf {
+    let projects = claude_projects(environment);
     let file_name = format!("{session_id}.jsonl");
     let expected = projects.join(claude_project_folder(cwd)).join(&file_name);
     if expected.exists() {

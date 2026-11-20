@@ -45,6 +45,8 @@ pub(crate) struct ServiceContext {
     pub push: crate::push_plugin::PushPlugin,
     /// 從 app 管理主機服務;None 時不能管理。
     pub service_management: Option<crate::remote_management::ServiceManagement>,
+    /// Send When Done 佇列;觀察者沒啟動時 None。
+    pub observer: Option<crate::agent_observer::AgentObserver>,
 }
 
 impl ServiceContext {

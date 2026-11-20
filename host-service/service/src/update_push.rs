@@ -111,17 +111,22 @@ impl<'transport> UpdateEventPush<'transport> {
     }
 
     fn pairings(&self) -> Vec<Pairing> {
-        let Ok(entries) = std::fs::read_dir(&self.purrdr_directory) else {
-            return Vec::new();
-        };
-        let mut pairings: Vec<Pairing> = entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("push-"))
-            .filter_map(|entry| Pairing::read(&entry.path()))
-            .collect();
-        pairings.sort_by(|left, right| left.directory.cmp(&right.directory));
-        pairings
+        pairings(&self.purrdr_directory)
     }
+}
+
+/// `<purrdr 資料夾>/push-*/pairing` 的每支裝置，依資料夾名稱排序。
+pub(crate) fn pairings(purrdr_directory: &Path) -> Vec<Pairing> {
+    let Ok(entries) = std::fs::read_dir(purrdr_directory) else {
+        return Vec::new();
+    };
+    let mut pairings: Vec<Pairing> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("push-"))
+        .filter_map(|entry| Pairing::read(&entry.path()))
+        .collect();
+    pairings.sort_by(|left, right| left.directory.cmp(&right.directory));
+    pairings
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -137,10 +142,12 @@ struct SentEvent {
 }
 
 /// 一支裝置的配對檔(格式同 app 的 `PushPairingFile`)。
-struct Pairing {
+pub(crate) struct Pairing {
     directory: PathBuf,
-    endpoint: String,
-    key: String,
+    pub(crate) endpoint: String,
+    pub(crate) key: String,
+    /// 這支裝置靜音的聊天(Agent 的 session 值)。
+    pub(crate) muted: Vec<String>,
 }
 
 impl Pairing {
@@ -149,15 +156,17 @@ impl Pairing {
         if credentials.endpoint.is_empty() || credentials.key.is_empty() {
             return None;
         }
+        let contents = std::fs::read_to_string(directory.join("pairing")).ok()?;
         Some(Pairing {
             directory: directory.to_owned(),
             endpoint: credentials.endpoint,
             key: credentials.key,
+            muted: contents.lines().filter_map(|line| line.strip_prefix("muted=")).map(str::to_owned).collect(),
         })
     }
 
     /// 送出期間重新配對了(密鑰換了)就不是被撤銷的那一組，不刪(同主機外掛)。
-    fn remove_if_unchanged(&self) {
+    pub(crate) fn remove_if_unchanged(&self) {
         if Pairing::read(&self.directory).is_some_and(|current| current.key == self.key) {
             let _ = std::fs::remove_dir_all(&self.directory);
         }

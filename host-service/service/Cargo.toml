@@ -14,6 +14,10 @@ filepath = "0.2.0"
 flate2 = "1.1.11"
 futures-util.workspace = true
 getrandom = "0.4.3"
+# 唯讀 git(git.status／git.diff):程序內讀 repo,不執行 git。只開 index、excludes——
+# status／dirwalk／blob-diff 會帶入 attributes 與 gix-command(可能執行 filter 程式)。
+gix = { version = "0.90.0", default-features = false, features = ["index", "excludes", "sha1"] }
+gix-imara-diff = { version = "0.3.3", features = ["unified_diff"] }
 humantime = "2.4.0"
 qrcode = { version = "0.14.1", default-features = false }
 serde.workspace = true
@@ -29,6 +33,10 @@ zip = { version = "9.7.3", default-features = false, features = ["deflate-flate2
 [target.'cfg(unix)'.dependencies]
 # 主機取檔開檔的 O_NOFOLLOW、O_NONBLOCK。
 libc = "0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+# 背景啟動程式前把自己的標準 handle 設成不可繼承(raychiutw/purrdr.host#35)。
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
 futures-util.workspace = true
@@ -57,4 +65,9 @@ harness = false
 # 假的 herdr CLI(plugin list／install／uninstall)是這支測試執行檔本身，所以不用 libtest。
 [[test]]
 name = "push_plugin"
+harness = false
+
+# 自己當「呼叫端」程序，所以不用 libtest。
+[[test]]
+name = "detached_stdio"
 harness = false

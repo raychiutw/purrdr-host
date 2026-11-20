@@ -16,25 +16,31 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::agent_observer::{AgentObserver, MAXIMUM_PROMPT_BYTES, MAXIMUM_QUEUED_PROMPTS, QueueFailure};
 use crate::audit_log::{AuditEvent, AuditLog, RevokedBy};
 use crate::device_store::{Device, DeviceStore, RevokeFailure};
+use crate::git_changes::{self, GitFailure};
 use crate::herdr_cli::HerdrCli;
 use crate::herdr_client::{HerdrClient, HerdrFailure, HerdrSubscription};
 use crate::host_files::{self, FileAccessCache, FileAccessEnvironment, FileAccessRules, FileSnapshot, Located, Purpose, RequestPacing};
 use crate::http::{ServiceContext, blocking};
+use crate::pane_guard::{self, GuardFailure};
+use crate::pane_screen;
 use crate::pane_terminal::{self, PaneTerminal};
 use crate::protocol::{
     Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, DevicesListResult, DevicesRevokeResult, ErrorCode,
     ErrorMessage, EventsEnded, EventsSubscribe, EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus,
-    FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, HerdrServer, PROTOCOL_VERSION, PairedDevice, PaneSendKeys,
-    PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent, TerminalScrollDirection,
-    TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
+    FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, GitDiff, GitDiffResult, GitStatus, GitStatusResult, HerdrServer,
+    PROTOCOL_VERSION, PairedDevice, PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, QueueAdd,
+    QueueAddResult, QueueList, QueueListResult, QueueRemove, QueueRemoveResult, QueueReorder, QueueReorderResult, ServerMessage, SessionsList,
+    SessionsListResult, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
 use crate::remote_management::{self, ServiceManagement};
+use crate::session_history;
 use crate::structure_operations;
 use crate::text_format::rfc3339;
-use crate::transcript::AgentSessionInfo;
+use crate::transcript::{AgentSessionInfo, TranscriptEnvironment};
 use crate::transcript_session::TranscriptSession;
 use crate::uploads::{ChunkOutcome, PendingUpload, UploadDirectory, UploadFailure};
 
@@ -82,6 +88,7 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         outbound: outbound.clone(),
         handshaken: false,
         transcripts: TranscriptSession::new(context.transcripts.clone(), pushes),
+        transcript_environment: context.transcripts.clone(),
         subscriptions: HashMap::new(),
         accepted_subscription: None,
         terminals: HashMap::new(),
@@ -95,6 +102,11 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         pending_uploads: HashMap::new(),
         service_management: context.service_management.clone(),
         devices: context.devices.clone(),
+        observer: context.observer.clone(),
+        queue_changes: context
+            .observer
+            .as_ref()
+            .map(|observer| forward_queue_changes(observer.subscribe(), outbound.clone())),
     };
     let handler = tokio::spawn(handle_requests(connection, request_queue, context, device_token));
     // 逾時沒收到任何 frame(含 pong)就當作 app 已經不在。
@@ -235,6 +247,8 @@ struct ClientConnection {
     outbound: mpsc::UnboundedSender<Outbound>,
     handshaken: bool,
     transcripts: TranscriptSession,
+    /// 續接 session 時找對話紀錄的位置。
+    transcript_environment: TranscriptEnvironment,
     /// 事件串流識別碼 → 轉送 herdr 事件的 task。
     subscriptions: HashMap<String, JoinHandle<()>>,
     /// herdr 剛接受、等訂閱結果送出後才開始轉送的訂閱。
@@ -256,12 +270,19 @@ struct ClientConnection {
     pending_uploads: HashMap<String, PendingUpload>,
     service_management: Option<ServiceManagement>,
     devices: DeviceStore,
+    /// Send When Done 佇列;觀察者沒啟動時 None。
+    observer: Option<AgentObserver>,
+    /// 把 queue.changed 轉給這條連線的 task。
+    queue_changes: Option<JoinHandle<()>>,
 }
 
 impl Drop for ClientConnection {
     fn drop(&mut self) {
         for forwarding in self.subscriptions.values() {
             forwarding.abort();
+        }
+        if let Some(queue_changes) = &self.queue_changes {
+            queue_changes.abort();
         }
     }
 }
@@ -322,6 +343,14 @@ impl ClientConnection {
             ClientMessage::TranscriptWorkflow(request) => self.transcripts.workflow(request).await,
             ClientMessage::TranscriptDelegation(request) => self.transcripts.delegation(request).await,
             ClientMessage::PaneSendText(request) => self.pane_send_text(request).await,
+            ClientMessage::PaneRead(request) => pane_screen::read(&self.herdr, request).await,
+            ClientMessage::SessionsList(request) => self.sessions_list(request).await,
+            ClientMessage::GitStatus(request) => self.git_status(request).await,
+            ClientMessage::GitDiff(request) => self.git_diff(request).await,
+            ClientMessage::QueueList(request) => self.queue_list(request),
+            ClientMessage::QueueAdd(request) => self.queue_add(request),
+            ClientMessage::QueueRemove(request) => self.queue_remove(request),
+            ClientMessage::QueueReorder(request) => self.queue_reorder(request),
             ClientMessage::AgentPrompt(request) => self.agent_prompt(request).await,
             ClientMessage::EventsSubscribe(request) => self.events_subscribe(request).await,
             ClientMessage::EventsUnsubscribe(request) => {
@@ -377,7 +406,7 @@ impl ClientConnection {
             ClientMessage::WorkspaceRename(request) => structure_operations::workspace_rename(&self.herdr, request).await,
             ClientMessage::WorkspaceClose(request) => structure_operations::workspace_close(&self.herdr, request).await,
             ClientMessage::WorktreeCreate(request) => structure_operations::worktree_create(&self.herdr, request).await,
-            ClientMessage::AgentStart(request) => structure_operations::agent_start(&self.herdr, request).await,
+            ClientMessage::AgentStart(request) => structure_operations::agent_start(&self.herdr, request, &self.transcript_environment).await,
             ClientMessage::FileUploadStart(request) => self.upload_start(request, device).await,
             ClientMessage::FileUploadChunk(request) => self.upload_chunk(request, device).await,
             ClientMessage::HostServiceStatus(request) => remote_management::status(self.service_management.clone(), request.request_id).await,
@@ -498,7 +527,133 @@ impl ClientConnection {
         })
     }
 
+    fn queue_list(&self, request: QueueList) -> ServerMessage {
+        let Some(observer) = &self.observer else {
+            return observer_missing(request.request_id);
+        };
+        ServerMessage::QueueListResult(QueueListResult {
+            queues: observer.list(request.pane_id.as_deref()),
+            request_id: request.request_id,
+        })
+    }
+
+    fn queue_add(&self, request: QueueAdd) -> ServerMessage {
+        let Some(observer) = &self.observer else {
+            return observer_missing(request.request_id);
+        };
+        if !pane_terminal::is_valid_target(&request.pane_id) || request.text.len() > MAXIMUM_PROMPT_BYTES {
+            return error(
+                Some(request.request_id),
+                ErrorCode::InvalidMessage,
+                &format!("invalid pane_id or text larger than {} KiB", MAXIMUM_PROMPT_BYTES / 1024),
+            );
+        }
+        match observer.add(&request.pane_id, request.text, request.expected_session) {
+            Ok(item_id) => ServerMessage::QueueAddResult(QueueAddResult {
+                request_id: request.request_id,
+                item_id,
+            }),
+            Err(failure) => queue_error(request.request_id, failure),
+        }
+    }
+
+    fn queue_remove(&self, request: QueueRemove) -> ServerMessage {
+        let Some(observer) = &self.observer else {
+            return observer_missing(request.request_id);
+        };
+        match observer.remove(&request.pane_id, &request.item_id) {
+            Ok(()) => ServerMessage::QueueRemoveResult(QueueRemoveResult {
+                request_id: request.request_id,
+            }),
+            Err(failure) => queue_error(request.request_id, failure),
+        }
+    }
+
+    fn queue_reorder(&self, request: QueueReorder) -> ServerMessage {
+        let Some(observer) = &self.observer else {
+            return observer_missing(request.request_id);
+        };
+        match observer.reorder(&request.pane_id, &request.item_ids) {
+            Ok(()) => ServerMessage::QueueReorderResult(QueueReorderResult {
+                request_id: request.request_id,
+            }),
+            Err(failure) => queue_error(request.request_id, failure),
+        }
+    }
+
+    /// 工作資料夾過去的 session(在 blocking 執行緒讀檔)。
+    async fn sessions_list(&self, request: SessionsList) -> ServerMessage {
+        if !std::path::Path::new(&request.cwd).is_absolute() {
+            return error(Some(request.request_id), ErrorCode::InvalidMessage, "cwd must be an absolute path");
+        }
+        let environment = self.transcript_environment.clone();
+        let sessions = blocking(move || session_history::list(&environment, &request.cwd, request.agent_kind)).await;
+        ServerMessage::SessionsListResult(SessionsListResult {
+            request_id: request.request_id,
+            sessions,
+        })
+    }
+
+    /// git.status／git.diff 只讀 herdr 目前回報的 Agent 工作目錄。Err 是要回的錯誤。
+    async fn reported_working_directory(&self, request_id: &str, cwd: &str) -> Result<PathBuf, Box<ServerMessage>> {
+        let result = match self.herdr.request("session.snapshot", json!({})).await {
+            Ok(result) => result,
+            Err(failure) => return Err(Box::new(herdr_error(request_id.to_owned(), "session.snapshot", failure))),
+        };
+        let snapshot = serde_json::from_value::<SnapshotResult>(result).unwrap_or_default().snapshot;
+        if snapshot.agents.iter().any(|agent| agent.cwd.as_deref() == Some(cwd)) {
+            Ok(PathBuf::from(cwd))
+        } else {
+            Err(Box::new(error(
+                Some(request_id.to_owned()),
+                ErrorCode::CwdNotAllowed,
+                "cwd is not the working directory of an agent herdr reports",
+            )))
+        }
+    }
+
+    async fn git_status(&self, request: GitStatus) -> ServerMessage {
+        let cwd = match self.reported_working_directory(&request.request_id, &request.cwd).await {
+            Ok(cwd) => cwd,
+            Err(reply) => return *reply,
+        };
+        match blocking(move || git_changes::status(&cwd)).await {
+            Ok(changes) => ServerMessage::GitStatusResult(GitStatusResult {
+                request_id: request.request_id,
+                branch: changes.branch,
+                files: changes.files,
+            }),
+            Err(failure) => git_error(request.request_id, failure),
+        }
+    }
+
+    async fn git_diff(&self, request: GitDiff) -> ServerMessage {
+        let cwd = match self.reported_working_directory(&request.request_id, &request.cwd).await {
+            Ok(cwd) => cwd,
+            Err(reply) => return *reply,
+        };
+        let only = request.path.clone();
+        match blocking(move || git_changes::diff(&cwd, only.as_deref())).await {
+            Ok((files, truncated)) => ServerMessage::GitDiffResult(GitDiffResult {
+                request_id: request.request_id,
+                files,
+                truncated,
+            }),
+            Err(failure) => git_error(request.request_id, failure),
+        }
+    }
+
     async fn pane_send_text(&self, request: PaneSendText) -> ServerMessage {
+        if let Err(failure) = pane_guard::check(
+            &self.herdr,
+            &request.pane_id,
+            request.expected_session.as_deref(),
+            request.expected_screen.as_deref(),
+        )
+        .await
+        {
+            return guard_error(request.request_id, failure);
+        }
         let params = json!({"pane_id": request.pane_id, "text": request.text});
         match self.herdr.request("pane.send_text", params).await {
             Ok(_) => ServerMessage::PaneSendTextResult(PaneSendTextResult {
@@ -509,6 +664,16 @@ impl ClientConnection {
     }
 
     async fn agent_prompt(&self, request: AgentPrompt) -> ServerMessage {
+        if let Err(failure) = pane_guard::check(
+            &self.herdr,
+            &request.pane_id,
+            request.expected_session.as_deref(),
+            request.expected_screen.as_deref(),
+        )
+        .await
+        {
+            return guard_error(request.request_id, failure);
+        }
         let mut params = json!({"target": request.pane_id, "text": request.text});
         let mut herdr_wait = Duration::ZERO;
         if let Some(wait) = request.wait {
@@ -806,6 +971,16 @@ impl ClientConnection {
     }
 
     async fn pane_send_keys(&self, request: PaneSendKeys) -> ServerMessage {
+        if let Err(failure) = pane_guard::check(
+            &self.herdr,
+            &request.pane_id,
+            request.expected_session.as_deref(),
+            request.expected_screen.as_deref(),
+        )
+        .await
+        {
+            return guard_error(request.request_id, failure);
+        }
         let params = json!({"pane_id": request.pane_id, "keys": request.keys});
         match self.herdr.request("pane.send_keys", params).await {
             Ok(_) => ServerMessage::PaneSendKeysResult(PaneSendKeysResult {
@@ -970,6 +1145,54 @@ pub(crate) fn herdr_error(request_id: String, method: &str, failure: HerdrFailur
             herdr_error.herdr_code = Some(code);
             ServerMessage::ErrorMessage(herdr_error)
         }
+    }
+}
+
+/// 送出前比對不通過時的錯誤：對象變了回 pane_changed,讀不到 herdr 照一般 herdr 錯誤。
+pub(crate) fn guard_error(request_id: String, failure: GuardFailure) -> ServerMessage {
+    match failure {
+        GuardFailure::Changed(message) => error(Some(request_id), ErrorCode::PaneChanged, &message),
+        GuardFailure::Herdr { method, failure } => herdr_error(request_id, method, failure),
+    }
+}
+
+/// 佇列變更推給這條連線(跟不上而漏掉的就略過，app 可再 queue.list)。
+fn forward_queue_changes(mut changes: tokio::sync::broadcast::Receiver<ServerMessage>, outbound: mpsc::UnboundedSender<Outbound>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match changes.recv().await {
+                Ok(change) => {
+                    if outbound.send(Outbound::Message(change)).is_err() {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    })
+}
+
+fn observer_missing(request_id: String) -> ServerMessage {
+    error(Some(request_id), ErrorCode::InternalError, "the agent observer is not running")
+}
+
+fn queue_error(request_id: String, failure: QueueFailure) -> ServerMessage {
+    match failure {
+        QueueFailure::Full => error(
+            Some(request_id),
+            ErrorCode::QueueFull,
+            &format!("this pane already has {MAXIMUM_QUEUED_PROMPTS} queued prompts"),
+        ),
+        QueueFailure::UnknownItem => error(Some(request_id), ErrorCode::QueueItemUnknown, "item_id is not in this queue"),
+        QueueFailure::Storage(message) => error(Some(request_id), ErrorCode::InternalError, &message),
+    }
+}
+
+fn git_error(request_id: String, failure: GitFailure) -> ServerMessage {
+    match failure {
+        GitFailure::NotRepository => error(Some(request_id), ErrorCode::NotGitRepository, "cwd is not inside a git working tree"),
+        GitFailure::Read(message) => error(Some(request_id), ErrorCode::InternalError, &message),
     }
 }
 
