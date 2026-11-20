@@ -65,6 +65,16 @@ pub enum ClientMessage {
     PushRemove(PushRemove),
     #[serde(rename = "push.update_muted")]
     PushUpdateMuted(PushUpdateMuted),
+    #[serde(rename = "workspace.create")]
+    WorkspaceCreate(WorkspaceCreate),
+    #[serde(rename = "workspace.rename")]
+    WorkspaceRename(WorkspaceRename),
+    #[serde(rename = "workspace.close")]
+    WorkspaceClose(WorkspaceClose),
+    #[serde(rename = "worktree.create")]
+    WorktreeCreate(WorktreeCreate),
+    #[serde(rename = "agent.start")]
+    AgentStart(AgentStart),
     #[serde(rename = "devices.list")]
     DevicesList(DevicesList),
     #[serde(rename = "devices.revoke")]
@@ -74,7 +84,7 @@ pub enum ClientMessage {
 impl ClientMessage {
     /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
     pub fn is_write(&self) -> bool {
-        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::DevicesRevoke(_))
+        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::DevicesRevoke(_))
     }
 }
 
@@ -128,6 +138,16 @@ pub enum ServerMessage {
     PushRemoveResult(PushRemoveResult),
     #[serde(rename = "push.update_muted.result")]
     PushUpdateMutedResult(PushUpdateMutedResult),
+    #[serde(rename = "workspace.create.result")]
+    WorkspaceCreateResult(WorkspaceCreateResult),
+    #[serde(rename = "workspace.rename.result")]
+    WorkspaceRenameResult(WorkspaceRenameResult),
+    #[serde(rename = "workspace.close.result")]
+    WorkspaceCloseResult(WorkspaceCloseResult),
+    #[serde(rename = "worktree.create.result")]
+    WorktreeCreateResult(WorktreeCreateResult),
+    #[serde(rename = "agent.start.result")]
+    AgentStartResult(AgentStartResult),
     #[serde(rename = "devices.list.result")]
     DevicesListResult(DevicesListResult),
     #[serde(rename = "devices.revoke.result")]
@@ -516,6 +536,111 @@ pub struct AgentPromptResult {
     /// herdr 回報的送達方式(例如 written_to_pty);沒有時省略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<String>,
+}
+
+/// 在主機上的資料夾建立 workspace(herdr workspace.create,不搶桌機焦點)。cwd 必須是主機上存在的絕對路徑資料夾(herdr 遇到不存在的資料夾會改開家目錄，所以主機服務先檢查)。新增聊天 = workspace.create 後對 root pane 送 agent.start。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCreate {
+    pub request_id: String,
+    /// 主機上的絕對路徑。
+    pub cwd: String,
+    /// workspace 名稱;省略時由 herdr 以資料夾名命名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// workspace 已建立;聊天開在 root_pane_id。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCreateResult {
+    pub request_id: String,
+    pub workspace_id: String,
+    pub root_pane_id: String,
+}
+
+/// 重新命名 workspace(herdr workspace.rename)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRename {
+    pub request_id: String,
+    pub workspace_id: String,
+    /// 新名稱，不可空白。
+    pub label: String,
+}
+
+/// 已重新命名。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRenameResult {
+    pub request_id: String,
+    /// herdr 實際保存的名稱(可能經正規化);沒有時省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// 關閉 workspace(herdr workspace.close):裡面的 tab、pane 與程序都會停止。不連同 worktree 群組一起關，同 repo 的 worktree workspace 還開著時以 herdr_error 回報(herdr_code workspace_group_close_required)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceClose {
+    pub request_id: String,
+    pub workspace_id: String,
+}
+
+/// 已關閉。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCloseResult {
+    pub request_id: String,
+}
+
+/// 以 workspace 所在的 git repo 建立 worktree 與分支，開成新的 workspace(herdr worktree.create,不搶桌機焦點)。分支已存在時 herdr 直接 checkout。不在 git repo 裡時以 herdr_error 回報(herdr_code not_git_worktree)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeCreate {
+    pub request_id: String,
+    /// 以這個 workspace 的 repo 為底。
+    pub workspace_id: String,
+    /// 分支名稱：不能以 - 開頭，不含空白、控制字元或 ..。
+    pub branch: String,
+}
+
+/// worktree 已建立並開成新的 workspace;聊天開在 root_pane_id。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeCreateResult {
+    pub request_id: String,
+    pub workspace_id: String,
+    pub root_pane_id: String,
+}
+
+/// 在 pane 的 shell 啟動 Agent(herdr agent.start)。新增聊天 = workspace.create 或 worktree.create 後對 root pane 送這個。不接受任意參數：只有 Claude Code 可帶 permission_mode(轉成 --permission-mode)。主機服務等 herdr 的時間隨 timeout_ms 延長;Agent 停在啟動問題、pane 不在 shell 提示字元等以 herdr_error 回報(herdr_code 如 agent_not_ready、agent_pane_busy、agent_name_taken)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStart {
+    pub request_id: String,
+    pub pane_id: String,
+    /// herdr 的 Agent 名稱：英數字、-、_、.,不能以 - 開頭。
+    pub name: String,
+    /// herdr 的 Agent 種類(herdr agent start --kind,例如 claude、codex),只有小寫英文字母與數字。
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<ClaudePermissionMode>,
+    /// 等 Agent 就緒的時間;省略時用 herdr 的預設(30 秒)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<i64>,
+}
+
+/// Claude Code 的 --permission-mode。省略時沿用使用者在主機上的設定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ClaudePermissionMode {
+    #[serde(rename = "manual")]
+    Manual,
+    #[serde(rename = "acceptEdits")]
+    AcceptEdits,
+    #[serde(rename = "plan")]
+    Plan,
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "bypassPermissions")]
+    BypassPermissions,
+}
+
+/// Agent 已在 pane 啟動。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStartResult {
+    pub request_id: String,
 }
 
 /// 開一條 Agent 事件串流(herdr events.subscribe)。herdr 接受後回 events.subscribe.result,之後以 events.event 推送，直到 events.ended 或 events.unsubscribe。事件只是「該重讀了」的訊號，對帳用 agents.list。

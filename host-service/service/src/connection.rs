@@ -30,6 +30,7 @@ use crate::protocol::{
     ServerMessage, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
+use crate::structure_operations;
 use crate::transcript::AgentSessionInfo;
 use crate::transcript_session::TranscriptSession;
 
@@ -257,6 +258,7 @@ impl ClientConnection {
                     AuditEvent::Write {
                         device_id: device.device_id.clone(),
                         operation: value["type"].as_str().unwrap_or_default().to_owned(),
+                        workspace_id: value["workspace_id"].as_str().map(str::to_owned),
                         pane_id: value["pane_id"].as_str().map(str::to_owned),
                         allowed: !device.read_only,
                     },
@@ -266,6 +268,17 @@ impl ClientConnection {
             if device.read_only {
                 return Some(error(request_id, ErrorCode::ReadOnlyDevice, "this device is paired read-only"));
             }
+        }
+        let structure_operation = matches!(
+            message,
+            ClientMessage::WorkspaceCreate(_)
+                | ClientMessage::WorkspaceRename(_)
+                | ClientMessage::WorkspaceClose(_)
+                | ClientMessage::WorktreeCreate(_)
+                | ClientMessage::AgentStart(_)
+        );
+        if structure_operation && !self.handshaken {
+            return Some(error(request_id, ErrorCode::HandshakeRequired, "send hello first"));
         }
         let reply = match message {
             ClientMessage::Hello(hello) => self.hello(hello.request_id, hello.protocol_version, device.read_only).await,
@@ -327,6 +340,11 @@ impl ClientConnection {
                 push_reply(request.request_id, outcome, PushState::muted_result)
             }
             ClientMessage::PushRemove(request) => push_reply(request.request_id, self.push.unpair(&request.device_id).await, PushState::unpaired_result),
+            ClientMessage::WorkspaceCreate(request) => structure_operations::workspace_create(&self.herdr, request).await,
+            ClientMessage::WorkspaceRename(request) => structure_operations::workspace_rename(&self.herdr, request).await,
+            ClientMessage::WorkspaceClose(request) => structure_operations::workspace_close(&self.herdr, request).await,
+            ClientMessage::WorktreeCreate(request) => structure_operations::worktree_create(&self.herdr, request).await,
+            ClientMessage::AgentStart(request) => structure_operations::agent_start(&self.herdr, request).await,
             ClientMessage::DevicesList(request) => self.devices_list(request.request_id, device).await,
             ClientMessage::DevicesRevoke(request) => self.devices_revoke(request.request_id, request.device_id, device).await,
             ClientMessage::PaneTerminalClose(close) => {
@@ -422,6 +440,7 @@ impl ClientConnection {
                 AuditEvent::Write {
                     device_id: device.device_id.clone(),
                     operation: "pane.terminal.open".to_owned(),
+                    workspace_id: None,
                     pane_id: Some(request.target.clone()),
                     allowed: true,
                 },
@@ -836,7 +855,7 @@ fn agents_list_result(request_id: String, result: Value) -> AgentsListResult {
     }
 }
 
-fn herdr_error(request_id: String, method: &str, failure: HerdrFailure) -> ServerMessage {
+pub(crate) fn herdr_error(request_id: String, method: &str, failure: HerdrFailure) -> ServerMessage {
     if failure.is_unknown_method(method) {
         return error(
             Some(request_id),
@@ -889,6 +908,6 @@ fn rfc3339(time: SystemTime) -> String {
     humantime::format_rfc3339_seconds(time).to_string()
 }
 
-fn error(request_id: Option<String>, code: ErrorCode, message: &str) -> ServerMessage {
+pub(crate) fn error(request_id: Option<String>, code: ErrorCode, message: &str) -> ServerMessage {
     ServerMessage::ErrorMessage(error_message(request_id, code, message))
 }

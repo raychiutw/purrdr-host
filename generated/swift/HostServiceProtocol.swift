@@ -41,6 +41,11 @@ extension HostServiceProtocol {
         case pushInstall(PushInstall)
         case pushRemove(PushRemove)
         case pushUpdateMuted(PushUpdateMuted)
+        case workspaceCreate(WorkspaceCreate)
+        case workspaceRename(WorkspaceRename)
+        case workspaceClose(WorkspaceClose)
+        case worktreeCreate(WorktreeCreate)
+        case agentStart(AgentStart)
         case devicesList(DevicesList)
         case devicesRevoke(DevicesRevoke)
 
@@ -74,6 +79,11 @@ extension HostServiceProtocol {
             case "push.install": self = .pushInstall(try PushInstall(from: decoder))
             case "push.remove": self = .pushRemove(try PushRemove(from: decoder))
             case "push.update_muted": self = .pushUpdateMuted(try PushUpdateMuted(from: decoder))
+            case "workspace.create": self = .workspaceCreate(try WorkspaceCreate(from: decoder))
+            case "workspace.rename": self = .workspaceRename(try WorkspaceRename(from: decoder))
+            case "workspace.close": self = .workspaceClose(try WorkspaceClose(from: decoder))
+            case "worktree.create": self = .worktreeCreate(try WorktreeCreate(from: decoder))
+            case "agent.start": self = .agentStart(try AgentStart(from: decoder))
             case "devices.list": self = .devicesList(try DevicesList(from: decoder))
             case "devices.revoke": self = .devicesRevoke(try DevicesRevoke(from: decoder))
             default:
@@ -150,6 +160,21 @@ extension HostServiceProtocol {
             case .pushUpdateMuted(let message):
                 try container.encode("push.update_muted", forKey: .type)
                 try message.encode(to: encoder)
+            case .workspaceCreate(let message):
+                try container.encode("workspace.create", forKey: .type)
+                try message.encode(to: encoder)
+            case .workspaceRename(let message):
+                try container.encode("workspace.rename", forKey: .type)
+                try message.encode(to: encoder)
+            case .workspaceClose(let message):
+                try container.encode("workspace.close", forKey: .type)
+                try message.encode(to: encoder)
+            case .worktreeCreate(let message):
+                try container.encode("worktree.create", forKey: .type)
+                try message.encode(to: encoder)
+            case .agentStart(let message):
+                try container.encode("agent.start", forKey: .type)
+                try message.encode(to: encoder)
             case .devicesList(let message):
                 try container.encode("devices.list", forKey: .type)
                 try message.encode(to: encoder)
@@ -162,7 +187,7 @@ extension HostServiceProtocol {
         /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
         public var isWrite: Bool {
             switch self {
-            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove, .pushUpdateMuted, .devicesRevoke: return true
+            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove, .pushUpdateMuted, .workspaceCreate, .workspaceRename, .workspaceClose, .worktreeCreate, .agentStart, .devicesRevoke: return true
             default: return false
             }
         }
@@ -195,6 +220,11 @@ extension HostServiceProtocol {
         case pushInstallResult(PushInstallResult)
         case pushRemoveResult(PushRemoveResult)
         case pushUpdateMutedResult(PushUpdateMutedResult)
+        case workspaceCreateResult(WorkspaceCreateResult)
+        case workspaceRenameResult(WorkspaceRenameResult)
+        case workspaceCloseResult(WorkspaceCloseResult)
+        case worktreeCreateResult(WorktreeCreateResult)
+        case agentStartResult(AgentStartResult)
         case devicesListResult(DevicesListResult)
         case devicesRevokeResult(DevicesRevokeResult)
         case errorMessage(ErrorMessage)
@@ -230,6 +260,11 @@ extension HostServiceProtocol {
             case "push.install.result": self = .pushInstallResult(try PushInstallResult(from: decoder))
             case "push.remove.result": self = .pushRemoveResult(try PushRemoveResult(from: decoder))
             case "push.update_muted.result": self = .pushUpdateMutedResult(try PushUpdateMutedResult(from: decoder))
+            case "workspace.create.result": self = .workspaceCreateResult(try WorkspaceCreateResult(from: decoder))
+            case "workspace.rename.result": self = .workspaceRenameResult(try WorkspaceRenameResult(from: decoder))
+            case "workspace.close.result": self = .workspaceCloseResult(try WorkspaceCloseResult(from: decoder))
+            case "worktree.create.result": self = .worktreeCreateResult(try WorktreeCreateResult(from: decoder))
+            case "agent.start.result": self = .agentStartResult(try AgentStartResult(from: decoder))
             case "devices.list.result": self = .devicesListResult(try DevicesListResult(from: decoder))
             case "devices.revoke.result": self = .devicesRevokeResult(try DevicesRevokeResult(from: decoder))
             case "error": self = .errorMessage(try ErrorMessage(from: decoder))
@@ -309,6 +344,21 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .pushUpdateMutedResult(let message):
                 try container.encode("push.update_muted.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .workspaceCreateResult(let message):
+                try container.encode("workspace.create.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .workspaceRenameResult(let message):
+                try container.encode("workspace.rename.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .workspaceCloseResult(let message):
+                try container.encode("workspace.close.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .worktreeCreateResult(let message):
+                try container.encode("worktree.create.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .agentStartResult(let message):
+                try container.encode("agent.start.result", forKey: .type)
                 try message.encode(to: encoder)
             case .devicesListResult(let message):
                 try container.encode("devices.list.result", forKey: .type)
@@ -1141,6 +1191,227 @@ extension HostServiceProtocol {
         private enum CodingKeys: String, CodingKey {
             case requestId = "request_id"
             case delivery
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 在主機上的資料夾建立 workspace(herdr workspace.create,不搶桌機焦點)。cwd 必須是主機上存在的絕對路徑資料夾(herdr 遇到不存在的資料夾會改開家目錄，所以主機服務先檢查)。新增聊天 = workspace.create 後對 root pane 送 agent.start。
+    public struct WorkspaceCreate: Codable, Sendable, Equatable {
+        public var requestId: String
+        /// 主機上的絕對路徑。
+        public var cwd: String
+        /// workspace 名稱;省略時由 herdr 以資料夾名命名。
+        public var label: String?
+
+        public init(requestId: String, cwd: String, label: String? = nil) {
+            self.requestId = requestId
+            self.cwd = cwd
+            self.label = label
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case cwd
+            case label
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// workspace 已建立;聊天開在 root_pane_id。
+    public struct WorkspaceCreateResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var workspaceId: String
+        public var rootPaneId: String
+
+        public init(requestId: String, workspaceId: String, rootPaneId: String) {
+            self.requestId = requestId
+            self.workspaceId = workspaceId
+            self.rootPaneId = rootPaneId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case workspaceId = "workspace_id"
+            case rootPaneId = "root_pane_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 重新命名 workspace(herdr workspace.rename)。
+    public struct WorkspaceRename: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var workspaceId: String
+        /// 新名稱，不可空白。
+        public var label: String
+
+        public init(requestId: String, workspaceId: String, label: String) {
+            self.requestId = requestId
+            self.workspaceId = workspaceId
+            self.label = label
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case workspaceId = "workspace_id"
+            case label
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 已重新命名。
+    public struct WorkspaceRenameResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        /// herdr 實際保存的名稱(可能經正規化);沒有時省略。
+        public var label: String?
+
+        public init(requestId: String, label: String? = nil) {
+            self.requestId = requestId
+            self.label = label
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case label
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 關閉 workspace(herdr workspace.close):裡面的 tab、pane 與程序都會停止。不連同 worktree 群組一起關，同 repo 的 worktree workspace 還開著時以 herdr_error 回報(herdr_code workspace_group_close_required)。
+    public struct WorkspaceClose: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var workspaceId: String
+
+        public init(requestId: String, workspaceId: String) {
+            self.requestId = requestId
+            self.workspaceId = workspaceId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case workspaceId = "workspace_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 已關閉。
+    public struct WorkspaceCloseResult: Codable, Sendable, Equatable {
+        public var requestId: String
+
+        public init(requestId: String) {
+            self.requestId = requestId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 以 workspace 所在的 git repo 建立 worktree 與分支，開成新的 workspace(herdr worktree.create,不搶桌機焦點)。分支已存在時 herdr 直接 checkout。不在 git repo 裡時以 herdr_error 回報(herdr_code not_git_worktree)。
+    public struct WorktreeCreate: Codable, Sendable, Equatable {
+        public var requestId: String
+        /// 以這個 workspace 的 repo 為底。
+        public var workspaceId: String
+        /// 分支名稱：不能以 - 開頭，不含空白、控制字元或 ..。
+        public var branch: String
+
+        public init(requestId: String, workspaceId: String, branch: String) {
+            self.requestId = requestId
+            self.workspaceId = workspaceId
+            self.branch = branch
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case workspaceId = "workspace_id"
+            case branch
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// worktree 已建立並開成新的 workspace;聊天開在 root_pane_id。
+    public struct WorktreeCreateResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var workspaceId: String
+        public var rootPaneId: String
+
+        public init(requestId: String, workspaceId: String, rootPaneId: String) {
+            self.requestId = requestId
+            self.workspaceId = workspaceId
+            self.rootPaneId = rootPaneId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case workspaceId = "workspace_id"
+            case rootPaneId = "root_pane_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 在 pane 的 shell 啟動 Agent(herdr agent.start)。新增聊天 = workspace.create 或 worktree.create 後對 root pane 送這個。不接受任意參數：只有 Claude Code 可帶 permission_mode(轉成 --permission-mode)。主機服務等 herdr 的時間隨 timeout_ms 延長;Agent 停在啟動問題、pane 不在 shell 提示字元等以 herdr_error 回報(herdr_code 如 agent_not_ready、agent_pane_busy、agent_name_taken)。
+    public struct AgentStart: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var paneId: String
+        /// herdr 的 Agent 名稱：英數字、-、_、.,不能以 - 開頭。
+        public var name: String
+        /// herdr 的 Agent 種類(herdr agent start --kind,例如 claude、codex),只有小寫英文字母與數字。
+        public var kind: String
+        public var permissionMode: ClaudePermissionMode?
+        /// 等 Agent 就緒的時間;省略時用 herdr 的預設(30 秒)。
+        public var timeoutMs: Int?
+
+        public init(requestId: String, paneId: String, name: String, kind: String, permissionMode: ClaudePermissionMode? = nil, timeoutMs: Int? = nil) {
+            self.requestId = requestId
+            self.paneId = paneId
+            self.name = name
+            self.kind = kind
+            self.permissionMode = permissionMode
+            self.timeoutMs = timeoutMs
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case paneId = "pane_id"
+            case name
+            case kind
+            case permissionMode = "permission_mode"
+            case timeoutMs = "timeout_ms"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// Claude Code 的 --permission-mode。省略時沿用使用者在主機上的設定。
+    public enum ClaudePermissionMode: String, Codable, Sendable, CaseIterable {
+        case manual
+        case acceptEdits
+        case plan
+        case auto
+        case bypassPermissions
+    }
+}
+
+extension HostServiceProtocol {
+    /// Agent 已在 pane 啟動。
+    public struct AgentStartResult: Codable, Sendable, Equatable {
+        public var requestId: String
+
+        public init(requestId: String) {
+            self.requestId = requestId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
         }
     }
 }
