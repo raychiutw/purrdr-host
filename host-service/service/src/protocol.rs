@@ -65,6 +65,10 @@ pub enum ClientMessage {
     PushRemove(PushRemove),
     #[serde(rename = "push.update_muted")]
     PushUpdateMuted(PushUpdateMuted),
+    #[serde(rename = "devices.list")]
+    DevicesList(DevicesList),
+    #[serde(rename = "devices.revoke")]
+    DevicesRevoke(DevicesRevoke),
     #[serde(rename = "host_service.status")]
     HostServiceStatus(HostServiceStatus),
     #[serde(rename = "host_service.update")]
@@ -76,7 +80,7 @@ pub enum ClientMessage {
 impl ClientMessage {
     /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
     pub fn is_write(&self) -> bool {
-        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_))
+        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_))
     }
 }
 
@@ -130,6 +134,10 @@ pub enum ServerMessage {
     PushRemoveResult(PushRemoveResult),
     #[serde(rename = "push.update_muted.result")]
     PushUpdateMutedResult(PushUpdateMutedResult),
+    #[serde(rename = "devices.list.result")]
+    DevicesListResult(DevicesListResult),
+    #[serde(rename = "devices.revoke.result")]
+    DevicesRevokeResult(DevicesRevokeResult),
     #[serde(rename = "host_service.status.result")]
     HostServiceStatusResult(HostServiceStatusResult),
     #[serde(rename = "host_service.update.result")]
@@ -733,6 +741,49 @@ pub struct PushUpdateMutedResult {
     pub other_devices: i64,
 }
 
+/// 列出這台主機已配對的裝置(raychiutw/purrdr.host#19;不含已撤銷的)。唯讀，唯讀裝置也可用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicesList {
+    pub request_id: String,
+}
+
+/// 已配對的裝置，依配對先後。不含權杖或其雜湊。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicesListResult {
+    pub request_id: String,
+    pub devices: Vec<PairedDevice>,
+}
+
+/// 一支已配對的裝置。時間是 RFC 3339 UTC(到秒)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairedDevice {
+    pub device_id: String,
+    /// 配對時 app 給的裝置名稱。
+    pub name: String,
+    pub read_only: bool,
+    pub paired_at: String,
+    /// 最後一次 WSS 連線的時間;還沒連過就沒有這欄。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_connected_at: Option<String>,
+    /// 是發出這個請求的裝置。
+    pub current: bool,
+}
+
+/// 撤銷一支已配對的裝置：之後它的每個 WSS 訊息都以 device_token_revoked 與 close code 4401 拒絕。已撤銷的再撤銷一次也成功;不認得的 device_id 回 device_unknown。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicesRevoke {
+    pub request_id: String,
+    /// devices.list.result 裡的 device_id。
+    pub device_id: String,
+}
+
+/// 已撤銷。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicesRevokeResult {
+    pub request_id: String,
+    pub device_id: String,
+}
+
 /// 從 app 管理主機服務(raychiutw/purrdr.host#18):查已安裝版本、最新版本(問 Release 來源)、自動更新開關、上次檢查或更新的結果與退回過的版本。唯讀，唯讀裝置也可用。沒有安裝(開發中直接執行)時回 host_service_not_installed。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostServiceStatus {
@@ -845,7 +896,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
@@ -888,6 +939,8 @@ pub enum ErrorCode {
     PushPluginFailed,
     #[serde(rename = "push_not_paired")]
     PushNotPaired,
+    #[serde(rename = "device_unknown")]
+    DeviceUnknown,
     #[serde(rename = "host_service_not_installed")]
     HostServiceNotInstalled,
     #[serde(rename = "update_in_progress")]

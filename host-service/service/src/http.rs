@@ -170,6 +170,7 @@ async fn revoke_self(State(context): State<ServiceContext>, headers: HeaderMap) 
                 AuditEvent::Revoked {
                     device_id: device.device_id,
                     by: RevokedBy::Device,
+                    by_device_id: None,
                 },
                 SystemTime::now(),
             );
