@@ -66,7 +66,9 @@ impl HerdrSearch {
 pub struct HerdrCli {
     /// `None`:每次執行時才找(herdr 可能在主機服務啟動後才安裝)。
     program: Option<PathBuf>,
-    leading_arguments: Vec<String>,
+    /// 執行檔後面固定的參數(測試的假 herdr CLI)。
+    program_arguments: Vec<String>,
+    session: Option<String>,
 }
 
 impl HerdrCli {
@@ -74,24 +76,35 @@ impl HerdrCli {
     pub fn search(session: Option<&str>) -> Self {
         HerdrCli {
             program: None,
-            leading_arguments: session
-                .filter(|name| !name.is_empty())
-                .map(|name| vec!["--session".to_owned(), name.to_owned()])
-                .unwrap_or_default(),
+            program_arguments: Vec::new(),
+            session: session.filter(|name| !name.is_empty()).map(str::to_owned),
         }
     }
 
-    /// 固定的執行檔與子指令前的參數(測試的假 herdr CLI)。
-    pub fn at_path(program: PathBuf, leading_arguments: Vec<String>) -> Self {
+    /// 固定的執行檔與它後面的參數(測試的假 herdr CLI)。
+    pub fn at_path(program: PathBuf, program_arguments: Vec<String>) -> Self {
         HerdrCli {
             program: Some(program),
-            leading_arguments,
+            program_arguments,
+            session: None,
         }
     }
 
-    /// 子指令前的參數。
-    pub fn leading_arguments(&self) -> &[String] {
-        &self.leading_arguments
+    /// 指定 herdr session(`--session`)。
+    pub fn with_session(mut self, session: &str) -> Self {
+        self.session = Some(session.to_owned()).filter(|name| !name.is_empty());
+        self
+    }
+
+    /// 經執行中的 herdr 伺服器的子指令前的參數(含 `--session`)。
+    pub fn leading_arguments(&self) -> Vec<String> {
+        let session = self.session.iter().flat_map(|name| ["--session".to_owned(), name.clone()]);
+        self.program_arguments.iter().cloned().chain(session).collect()
+    }
+
+    /// 不分 session 的子指令(例如 plugin install,對所有 session 生效)前的參數。
+    pub fn program_arguments(&self) -> &[String] {
+        &self.program_arguments
     }
 
     /// 要執行的檔案;找不到時回 `herdr`,由執行失敗回報。

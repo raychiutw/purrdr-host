@@ -1,0 +1,447 @@
+//! 推播外掛代裝(raychiutw/purrdr.host#10、raychiutw/purrdr.ios#261):`push.status`／`push.install`／`push.remove`。
+//! 以真正的 WebSocket client 從協定這一端驗證，外部行為只看回應、家目錄的檔案與假 herdr CLI 收到的指令。
+//!
+//! 假的 herdr CLI 就是這支測試執行檔本身(`fake-herdr <資料夾>` 參數):`installed` 存在代表已安裝 purrdr.push,
+//! `install-fails`／`list-fails` 存在時對應指令失敗，每次呼叫的參數記在 `calls`。所以不用 libtest(`harness = false`)。
+
+mod support;
+
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+
+use purrdr_host_service::herdr_cli::HerdrCli;
+use serde_json::{Value, json};
+use support::{FakeHerdr, TestClient, TestHostService, recorded, start_service_with_herdr_cli_and_home};
+use tempfile::TempDir;
+
+const FAKE_HERDR: &str = "fake-herdr";
+const PLUGIN_SOURCE: &str = "raychiutw/purrdr.host/host-plugin";
+const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+const ENDPOINT: &str = "https://push.example.com/v1/push";
+
+// MARK: - 假的 herdr CLI
+
+/// `fake-herdr <資料夾> [--session <名稱>] plugin list|install|uninstall …`(輸出形狀同 herdr 0.9.5)。
+fn fake_herdr(arguments: &[String]) -> i32 {
+    let directory = PathBuf::from(&arguments[0]);
+    let herdr_arguments = &arguments[1..];
+    let mut calls = std::fs::OpenOptions::new().create(true).append(true).open(directory.join("calls")).unwrap();
+    writeln!(calls, "{}", herdr_arguments.join(" ")).unwrap();
+    let installed = directory.join("installed");
+    let plugin = herdr_arguments.iter().position(|argument| argument == "plugin").unwrap();
+    match herdr_arguments[plugin..].join(" ").as_str() {
+        "plugin list --plugin purrdr.push --json" => {
+            if directory.join("list-fails").exists() {
+                eprintln!("herdr server is not running");
+                return 1;
+            }
+            let plugins = if installed.exists() {
+                json!([{"plugin_id": "purrdr.push", "name": "Purrdr Push", "version": "0.1.0", "enabled": true}])
+            } else {
+                json!([])
+            };
+            println!("{}", json!({"id": "cli:plugin", "result": {"plugins": plugins, "type": "plugin_list"}}));
+            0
+        }
+        "plugin install raychiutw/purrdr.host/host-plugin --yes" => {
+            if directory.join("install-fails").exists() {
+                eprintln!("git clone failed");
+                return 1;
+            }
+            std::fs::write(installed, b"").unwrap();
+            0
+        }
+        "plugin uninstall purrdr.push" => {
+            let _ = std::fs::remove_file(installed);
+            0
+        }
+        other => {
+            eprintln!("unexpected: {other}");
+            2
+        }
+    }
+}
+
+// MARK: - 測試環境
+
+struct Harness {
+    _herdr: FakeHerdr,
+    fake: TempDir,
+    home: TempDir,
+    service: TestHostService,
+}
+
+impl Harness {
+    async fn start() -> Harness {
+        Harness::start_with_session(None).await
+    }
+
+    async fn start_with_session(session: Option<&str>) -> Harness {
+        let herdr = FakeHerdr::start(vec![("ping", recorded("ping.ndjson"))]).await;
+        let fake = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        // 實際的主機上 `~/.purrdr/` 已有主機服務自己的資料夾。
+        std::fs::create_dir_all(home.path().join(".purrdr/host-service")).unwrap();
+        let mut cli = HerdrCli::at_path(
+            std::env::current_exe().unwrap(),
+            vec![FAKE_HERDR.to_owned(), fake.path().to_string_lossy().into_owned()],
+        );
+        if let Some(session) = session {
+            cli = cli.with_session(session);
+        }
+        let service = start_service_with_herdr_cli_and_home(herdr.socket.clone(), cli, home.path().to_owned()).await;
+        Harness {
+            _herdr: herdr,
+            fake,
+            home,
+            service,
+        }
+    }
+
+    async fn client(&self) -> TestClient {
+        let mut client = TestClient::connect(&self.service).await;
+        client.request(hello()).await;
+        client
+    }
+
+    async fn read_only_client(&self) -> TestClient {
+        let device = self.service.pair_device("借出的 iPad", true);
+        let mut client = TestClient::connect_with_token(&self.service, Some(&device.device_token)).await;
+        client.request(hello()).await;
+        client
+    }
+
+    /// 假 herdr 收到的指令(不含 `fake-herdr <資料夾>`)。
+    fn calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.fake.path().join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn plugin_installed(&self) -> bool {
+        self.fake.path().join("installed").exists()
+    }
+
+    fn mark(&self, name: &str) {
+        std::fs::write(self.fake.path().join(name), b"").unwrap();
+    }
+
+    fn home_file(&self, relative: &str) -> Option<String> {
+        std::fs::read_to_string(self.home.path().join(relative)).ok()
+    }
+
+    /// 家目錄的樣子(相對路徑 → 內容;資料夾是 `None`)。
+    fn home_snapshot(&self) -> BTreeMap<String, Option<String>> {
+        let mut snapshot = BTreeMap::new();
+        collect(self.home.path(), self.home.path(), &mut snapshot);
+        snapshot
+    }
+}
+
+fn collect(root: &Path, directory: &Path, snapshot: &mut BTreeMap<String, Option<String>>) {
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        let relative = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+        if path.is_dir() {
+            snapshot.insert(relative, None);
+            collect(root, &path, snapshot);
+        } else {
+            snapshot.insert(relative, Some(std::fs::read_to_string(&path).unwrap()));
+        }
+    }
+}
+
+fn hello() -> Value {
+    json!({"type": "hello", "request_id": "h1", "protocol_version": 1})
+}
+
+fn status(device_id: &str) -> Value {
+    json!({"type": "push.status", "request_id": "s1", "device_id": device_id})
+}
+
+fn install(device_id: &str) -> Value {
+    json!({
+        "type": "push.install", "request_id": "i1", "device_id": device_id,
+        "pairing": {"endpoint": ENDPOINT, "key": KEY, "muted": ["w1-session"]},
+    })
+}
+
+fn remove(device_id: &str) -> Value {
+    json!({"type": "push.remove", "request_id": "r1", "device_id": device_id})
+}
+
+fn state(kind: &str, request_id: &str, plugin_installed: bool, paired: bool, other_devices: u64) -> Value {
+    json!({
+        "type": kind, "request_id": request_id, "plugin_installed": plugin_installed,
+        "paired": paired, "other_devices": other_devices,
+    })
+}
+
+fn list_call(session: &str) -> String {
+    format!("{session}plugin list --plugin purrdr.push --json")
+}
+
+// MARK: - 測試
+
+async fn status_of_a_fresh_host_reports_nothing_installed() {
+    let harness = Harness::start().await;
+    let mut client = harness.client().await;
+
+    let reply = client.request(status("phone-a")).await;
+
+    assert_eq!(reply, state("push.status.result", "s1", false, false, 0));
+}
+
+async fn install_writes_the_pairing_and_installs_the_plugin_without_session() {
+    let harness = Harness::start_with_session(Some("work")).await;
+    let mut client = harness.client().await;
+
+    let reply = client.request(install("phone-a")).await;
+
+    assert_eq!(reply, state("push.install.result", "i1", true, true, 0));
+    assert_eq!(
+        harness.home_file(".purrdr/push-phone-a/pairing").as_deref(),
+        Some(format!("purrdr-push 1\nendpoint={ENDPOINT}\nkey={KEY}\nmuted=w1-session\n").as_str())
+    );
+    // SSH 路徑以安裝紀錄判斷已安裝(ReversibleHostWrite),兩條路徑要能互相移除。
+    assert_eq!(
+        harness.home_file(".purrdr/push-phone-a/journal.json").as_deref(),
+        Some(r#"{"entries":[],"version":1}"#)
+    );
+    assert_eq!(
+        harness.home_file(".purrdr/push-plugin/journal.json").as_deref(),
+        Some(r#"{"entries":[],"version":1}"#)
+    );
+    assert_eq!(
+        harness.home_file(".purrdr/push-plugin/source").as_deref(),
+        Some(format!("{PLUGIN_SOURCE}\n").as_str())
+    );
+    assert!(harness.plugin_installed());
+    assert_eq!(
+        harness.calls(),
+        [
+            list_call("--session work "),
+            format!("plugin install {PLUGIN_SOURCE} --yes"),
+            list_call("--session work ")
+        ]
+    );
+}
+
+async fn second_device_only_adds_its_pairing() {
+    let harness = Harness::start().await;
+    let mut client = harness.client().await;
+    client.request(install("phone-a")).await;
+    let installs_before = harness.calls().iter().filter(|call| call.contains("install")).count();
+
+    let reply = client.request(install("ipad-b")).await;
+    let status_of_first = client.request(status("phone-a")).await;
+
+    assert_eq!(reply, state("push.install.result", "i1", true, true, 1));
+    assert_eq!(status_of_first, state("push.status.result", "s1", true, true, 1));
+    assert!(harness.home_file(".purrdr/push-ipad-b/pairing").is_some());
+    assert_eq!(harness.calls().iter().filter(|call| call.contains("install")).count(), installs_before);
+}
+
+async fn failed_plugin_install_leaves_the_home_as_before() {
+    let harness = Harness::start().await;
+    harness.mark("install-fails");
+    let before = harness.home_snapshot();
+    let mut client = harness.client().await;
+
+    let reply = client.request(install("phone-a")).await;
+
+    assert_eq!(reply["type"], "error");
+    assert_eq!(reply["request_id"], "i1");
+    assert_eq!(reply["code"], "push_plugin_failed");
+    assert_eq!(reply["message"], "git clone failed");
+    assert_eq!(harness.home_snapshot(), before);
+}
+
+async fn herdr_failing_to_list_plugins_is_reported() {
+    let harness = Harness::start().await;
+    harness.mark("list-fails");
+    let mut client = harness.client().await;
+
+    let reply = client.request(status("phone-a")).await;
+
+    assert_eq!(reply["code"], "push_plugin_failed");
+    assert_eq!(reply["message"], "herdr server is not running");
+}
+
+async fn removing_one_device_keeps_the_plugin_for_the_others() {
+    let harness = Harness::start().await;
+    let mut client = harness.client().await;
+    client.request(install("phone-a")).await;
+    client.request(install("ipad-b")).await;
+
+    let reply = client.request(remove("phone-a")).await;
+
+    assert_eq!(reply, state("push.remove.result", "r1", true, false, 1));
+    assert_eq!(harness.home_file(".purrdr/push-phone-a/pairing"), None);
+    assert!(!harness.home.path().join(".purrdr/push-phone-a").exists());
+    assert!(harness.home_file(".purrdr/push-ipad-b/pairing").is_some());
+    assert!(harness.plugin_installed());
+    assert!(!harness.calls().iter().any(|call| call.contains("uninstall")));
+}
+
+async fn removing_the_last_device_uninstalls_the_plugin_and_restores_the_home() {
+    let harness = Harness::start().await;
+    let before = harness.home_snapshot();
+    let mut client = harness.client().await;
+    client.request(install("phone-a")).await;
+    client.request(install("ipad-b")).await;
+    client.request(remove("ipad-b")).await;
+
+    let reply = client.request(remove("phone-a")).await;
+
+    assert_eq!(reply, state("push.remove.result", "r1", false, false, 0));
+    assert!(!harness.plugin_installed());
+    assert_eq!(harness.home_snapshot(), before);
+}
+
+async fn plugin_the_user_installed_is_never_uninstalled() {
+    let harness = Harness::start().await;
+    harness.mark("installed");
+    let mut client = harness.client().await;
+    client.request(install("phone-a")).await;
+
+    let reply = client.request(remove("phone-a")).await;
+
+    assert_eq!(reply, state("push.remove.result", "r1", true, false, 0));
+    assert!(harness.plugin_installed());
+    assert!(!harness.calls().iter().any(|call| call.contains("install ") || call.contains("uninstall")));
+}
+
+async fn read_only_device_can_query_but_not_install_or_remove() {
+    let harness = Harness::start().await;
+    let before = harness.home_snapshot();
+    let mut client = harness.read_only_client().await;
+
+    let installed = client.request(install("phone-a")).await;
+    let removed = client.request(remove("phone-a")).await;
+    let calls_before_status = harness.calls();
+    let queried = client.request(status("phone-a")).await;
+
+    assert_eq!(installed["code"], "read_only_device");
+    assert_eq!(removed["code"], "read_only_device");
+    assert!(calls_before_status.is_empty(), "{calls_before_status:?}");
+    assert_eq!(queried, state("push.status.result", "s1", false, false, 0));
+    assert_eq!(harness.home_snapshot(), before);
+}
+
+async fn unsafe_device_ids_and_pairings_are_rejected_without_touching_the_host() {
+    let harness = Harness::start().await;
+    let before = harness.home_snapshot();
+    let mut client = harness.client().await;
+    let mut bad_key = install("phone-a");
+    bad_key["pairing"]["key"] = json!("not-hex");
+    let mut plain_http = install("phone-a");
+    plain_http["pairing"]["endpoint"] = json!("http://push.example.com/v1/push");
+    let mut multiline_mute = install("phone-a");
+    multiline_mute["pairing"]["muted"] = json!(["a\nkey=evil"]);
+
+    let replies = [
+        client.request(install("../escape")).await,
+        client.request(install("plugin")).await,
+        client.request(remove("Phone")).await,
+        client.request(status("")).await,
+        client.request(bad_key).await,
+        client.request(plain_http).await,
+        client.request(multiline_mute).await,
+    ];
+
+    for reply in &replies {
+        assert_eq!(reply["code"], "invalid_message", "{reply}");
+    }
+    assert!(harness.calls().is_empty(), "{:?}", harness.calls());
+    assert_eq!(harness.home_snapshot(), before);
+}
+
+async fn install_and_remove_are_audited_without_the_key() {
+    let harness = Harness::start().await;
+    let mut client = harness.client().await;
+    client.request(install("phone-a")).await;
+    client.request(remove("phone-a")).await;
+
+    let audit = harness.service.audit_log();
+
+    assert!(audit.contains("push.install"), "{audit}");
+    assert!(audit.contains("push.remove"), "{audit}");
+    assert!(!audit.contains(KEY), "{audit}");
+}
+
+// MARK: - 執行
+
+type TestCase = (&'static str, fn() -> Pin<Box<dyn Future<Output = ()>>>);
+
+fn tests() -> Vec<TestCase> {
+    vec![
+        ("status_of_a_fresh_host_reports_nothing_installed", || {
+            Box::pin(status_of_a_fresh_host_reports_nothing_installed())
+        }),
+        ("install_writes_the_pairing_and_installs_the_plugin_without_session", || {
+            Box::pin(install_writes_the_pairing_and_installs_the_plugin_without_session())
+        }),
+        ("second_device_only_adds_its_pairing", || Box::pin(second_device_only_adds_its_pairing())),
+        ("failed_plugin_install_leaves_the_home_as_before", || {
+            Box::pin(failed_plugin_install_leaves_the_home_as_before())
+        }),
+        ("herdr_failing_to_list_plugins_is_reported", || {
+            Box::pin(herdr_failing_to_list_plugins_is_reported())
+        }),
+        ("removing_one_device_keeps_the_plugin_for_the_others", || {
+            Box::pin(removing_one_device_keeps_the_plugin_for_the_others())
+        }),
+        ("removing_the_last_device_uninstalls_the_plugin_and_restores_the_home", || {
+            Box::pin(removing_the_last_device_uninstalls_the_plugin_and_restores_the_home())
+        }),
+        ("plugin_the_user_installed_is_never_uninstalled", || {
+            Box::pin(plugin_the_user_installed_is_never_uninstalled())
+        }),
+        ("read_only_device_can_query_but_not_install_or_remove", || {
+            Box::pin(read_only_device_can_query_but_not_install_or_remove())
+        }),
+        ("unsafe_device_ids_and_pairings_are_rejected_without_touching_the_host", || {
+            Box::pin(unsafe_device_ids_and_pairings_are_rejected_without_touching_the_host())
+        }),
+        ("install_and_remove_are_audited_without_the_key", || {
+            Box::pin(install_and_remove_are_audited_without_the_key())
+        }),
+    ]
+}
+
+fn main() -> std::process::ExitCode {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.first().map(String::as_str) == Some(FAKE_HERDR) {
+        return std::process::ExitCode::from(fake_herdr(&arguments[1..]) as u8);
+    }
+    // cargo test 傳進來的篩選字(不是 `--` 開頭的參數)。
+    let filters: Vec<&String> = arguments.iter().filter(|argument| !argument.starts_with('-')).collect();
+    let selected: Vec<TestCase> = tests()
+        .into_iter()
+        .filter(|(name, _)| filters.is_empty() || filters.iter().any(|filter| name.contains(filter.as_str())))
+        .collect();
+    println!("\nrunning {} tests", selected.len());
+    let mut failures = Vec::new();
+    for (name, test) in &selected {
+        let outcome = std::panic::catch_unwind(|| {
+            tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(test());
+        });
+        println!("test {name} ... {}", if outcome.is_ok() { "ok" } else { "FAILED" });
+        if outcome.is_err() {
+            failures.push(*name);
+        }
+    }
+    println!("\ntest result: {} passed; {} failed", selected.len() - failures.len(), failures.len());
+    if failures.is_empty() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        println!("failures: {failures:?}");
+        std::process::ExitCode::FAILURE
+    }
+}
