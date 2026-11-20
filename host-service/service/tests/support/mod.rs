@@ -65,7 +65,7 @@ pub struct FakeHerdr {
 
 struct FakeHerdrState {
     /// method → (回應, 回應前等多久)。
-    replies: HashMap<String, (Value, Duration)>,
+    replies: Mutex<HashMap<String, (Value, Duration)>>,
     requests: Mutex<Vec<Value>>,
     subscriptions: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<Push>>>,
 }
@@ -86,12 +86,17 @@ impl FakeHerdr {
     pub async fn start_delayed(replies: Vec<(&str, Value, Duration)>) -> FakeHerdr {
         let socket = unique_socket();
         let shared = Arc::new(FakeHerdrState {
-            replies: replies.into_iter().map(|(method, reply, delay)| (method.to_owned(), (reply, delay))).collect(),
+            replies: Mutex::new(replies.into_iter().map(|(method, reply, delay)| (method.to_owned(), (reply, delay))).collect()),
             requests: Mutex::new(Vec::new()),
             subscriptions: Mutex::new(Vec::new()),
         });
         listen(&socket, shared.clone());
         FakeHerdr { socket, shared }
+    }
+
+    /// 之後的 `method` 請求改回 `reply`(模擬 herdr 的狀態在測試中途改變)。
+    pub fn set_reply(&self, method: &str, reply: Value) {
+        self.shared.replies.lock().unwrap().insert(method.to_owned(), (reply, Duration::ZERO));
     }
 
     /// 收到的請求(整行 JSON),依收到順序。
@@ -161,11 +166,11 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(stream: S, shared: 
                 line.clear();
                 shared.requests.lock().unwrap().push(request.clone());
                 let method = request["method"].as_str().unwrap_or_default();
-                let Some((reply, delay)) = shared.replies.get(method) else {
+                let Some((reply, delay)) = shared.replies.lock().unwrap().get(method).cloned() else {
                     return;
                 };
-                tokio::time::sleep(*delay).await;
-                let mut reply = reply.clone();
+                tokio::time::sleep(delay).await;
+                let mut reply = reply;
                 reply["id"] = request["id"].clone();
                 write_line(&mut writing, &reply).await;
                 if method == "events.subscribe"

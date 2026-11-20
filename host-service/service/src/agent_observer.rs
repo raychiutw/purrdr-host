@@ -85,8 +85,8 @@ struct StoredQueue {
 struct StoredPrompt {
     item_id: String,
     text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    expected_session: Option<String>,
+    /// 送出前比對的 Agent session(必填：對象換了就不送)。
+    expected_session: String,
 }
 
 /// Send When Done 佇列與變更通知;連線與觀察者 task 共用。
@@ -128,7 +128,7 @@ impl AgentObserver {
             .collect()
     }
 
-    pub(crate) fn add(&self, pane_id: &str, text: String, expected_session: Option<String>) -> Result<String, QueueFailure> {
+    pub(crate) fn add(&self, pane_id: &str, text: String, expected_session: String) -> Result<String, QueueFailure> {
         let item_id = new_item_id().map_err(|error| QueueFailure::Storage(error.to_string()))?;
         self.change(pane_id, None, |queue| {
             if queue.items.len() >= MAXIMUM_QUEUED_PROMPTS {
@@ -139,7 +139,7 @@ impl AgentObserver {
                 text,
                 expected_session,
             });
-            queue.paused = None;
+            // 不解除暫停：暫停是因為第一則的對象換了，加在後面不會改變這件事。
             Ok(())
         })?;
         Ok(item_id)
@@ -249,9 +249,19 @@ pub(crate) fn spawn(herdr: HerdrClient, observer: AgentObserver, options: Observ
                 delay = options.reconnect_initial;
                 // 訂閱之後才讀 snapshot:中間的轉換會在訂閱裡，不會漏掉。
                 if let Ok(snapshot) = herdr.request("session.snapshot", json!({})).await {
-                    statuses = snapshot_statuses(&snapshot);
-                    for (pane_id, status) in &statuses {
+                    let current = snapshot_statuses(&snapshot);
+                    for (pane_id, status) in &current {
                         attention.status(pane_id, status, Instant::now());
+                    }
+                    // 斷線期間做完的 Agent:重連前還是 working、現在已 idle／done,照樣送出佇列。
+                    let finished: Vec<String> = current
+                        .iter()
+                        .filter(|(pane_id, status)| statuses.get(*pane_id).map(String::as_str) == Some("working") && is_finished(status))
+                        .map(|(pane_id, _)| pane_id.clone())
+                        .collect();
+                    statuses = current;
+                    for pane_id in finished {
+                        send_next(&herdr, &observer, &pane_id).await;
                     }
                 }
                 let (mut events, reader) = read_events(subscription);
@@ -263,7 +273,7 @@ pub(crate) fn spawn(herdr: HerdrClient, observer: AgentObserver, options: Observ
                             if let Some((pane_id, status)) = status_change(&event) {
                                 attention.status(&pane_id, &status, Instant::now());
                                 let previous = statuses.insert(pane_id.clone(), status.clone());
-                                if previous.as_deref() == Some("working") && matches!(status.as_str(), "idle" | "done") {
+                                if previous.as_deref() == Some("working") && is_finished(&status) {
                                     send_next(&herdr, &observer, &pane_id).await;
                                 }
                             }
@@ -306,8 +316,10 @@ async fn check_attention(herdr: &HerdrClient, attention: &mut AttentionDetector,
     let Some(home) = home else {
         return;
     };
+    // 另開 task 送：後台慢的時候不擋住 Send When Done 的事件處理。
     for (pane_id, status) in alerts {
-        push(herdr, home, &pane_id, status).await;
+        let (herdr, home) = (herdr.clone(), home.to_owned());
+        tokio::spawn(async move { push(&herdr, &home, &pane_id, status).await });
     }
 }
 
@@ -341,6 +353,11 @@ fn workspace_label(snapshot: &Value, pane_id: &str) -> Option<String> {
     Some(label.unwrap_or(workspace_id).to_owned())
 }
 
+/// Agent 做完了(working 之後變成這些狀態才送佇列)。
+fn is_finished(status: &str) -> bool {
+    matches!(status, "idle" | "done")
+}
+
 fn snapshot_statuses(snapshot: &Value) -> HashMap<String, String> {
     snapshot["snapshot"]["agents"]
         .as_array()
@@ -363,7 +380,7 @@ async fn send_next(herdr: &HerdrClient, observer: &AgentObserver, pane_id: &str)
     let Some(item) = observer.next(pane_id) else {
         return;
     };
-    match pane_guard::check(herdr, pane_id, item.expected_session.as_deref(), None).await {
+    match pane_guard::check(herdr, pane_id, Some(&item.expected_session), None).await {
         Ok(()) => {}
         Err(GuardFailure::Changed(_)) => {
             let _ = observer.change(pane_id, None, |queue| {

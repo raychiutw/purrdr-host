@@ -31,7 +31,7 @@ async fn herdr() -> FakeHerdr {
         ("ping", recorded("ping.ndjson")),
         ("session.snapshot", recorded("session.snapshot.ndjson")),
         ("events.subscribe", recorded("events.subscribe.started.ndjson")),
-        ("agent.prompt", json!({"id": "", "result": {"type": "agent_prompted", "delivery": "submitted"}})),
+        ("agent.prompt", recorded("agent.prompt.ndjson")),
     ])
     .await
 }
@@ -179,12 +179,12 @@ async fn queues_have_limits_and_only_known_items_can_be_changed() {
 
     let full = request(
         &mut client,
-        json!({"type": "queue.add", "request_id": "r2", "pane_id": "w1:p6", "text": "one more"}),
+        json!({"type": "queue.add", "request_id": "r2", "pane_id": "w1:p6", "text": "one more", "expected_session": PA_SESSION}),
     )
     .await;
     let too_long = request(
         &mut client,
-        json!({"type": "queue.add", "request_id": "r3", "pane_id": "w1:pB", "text": "x".repeat(64 * 1024 + 1)}),
+        json!({"type": "queue.add", "request_id": "r3", "pane_id": "w1:pB", "text": "x".repeat(64 * 1024 + 1), "expected_session": PB_SESSION}),
     )
     .await;
     let unknown = request(
@@ -279,7 +279,7 @@ async fn read_only_devices_see_queues_but_cannot_change_them_and_audit_skips_the
     reader.request(hello("r1")).await;
 
     let denied = reader
-        .request(json!({"type": "queue.add", "request_id": "r2", "pane_id": "w1:pA", "text": "nope"}))
+        .request(json!({"type": "queue.add", "request_id": "r2", "pane_id": "w1:pA", "text": "nope", "expected_session": PA_SESSION}))
         .await;
     let listed = request(&mut reader, json!({"type": "queue.list", "request_id": "r3"})).await;
 
@@ -288,4 +288,61 @@ async fn read_only_devices_see_queues_but_cannot_change_them_and_audit_skips_the
     let audit = service.audit_log();
     assert!(audit.contains("\"operation\":\"queue.add\""), "{audit}");
     assert!(!audit.contains("SECRET-PROMPT-TEXT"));
+}
+
+#[tokio::test]
+async fn every_queued_prompt_names_the_session_it_is_for() {
+    let herdr = herdr().await;
+    let service = observing(&herdr, None).await;
+    let mut client = connect(&service).await;
+
+    let reply = request(
+        &mut client,
+        json!({"type": "queue.add", "request_id": "r2", "pane_id": "w1:pA", "text": "for whichever chat"}),
+    )
+    .await;
+
+    assert_eq!(reply["code"], "invalid_message", "{reply}");
+}
+
+#[tokio::test]
+async fn adding_behind_a_paused_prompt_keeps_the_queue_paused() {
+    let herdr = herdr().await;
+    let service = observing(&herdr, None).await;
+    let mut client = connect(&service).await;
+    let stale = add(&mut client, "w1:pA", "for the old chat", "00000000-0000-0000-0000-0000000000ff").await;
+    herdr.push_event(status("w1:pA", "idle"));
+    change_where(&mut client, |change| change["queue"].get("paused").is_some()).await;
+
+    add(&mut client, "w1:pA", "for this chat", PA_SESSION).await;
+    let listed = request(&mut client, json!({"type": "queue.list", "request_id": "r3", "pane_id": "w1:pA"})).await;
+    assert_eq!(listed["queues"][0]["paused"], "session_changed", "{listed}");
+
+    request(
+        &mut client,
+        json!({"type": "queue.remove", "request_id": "r4", "pane_id": "w1:pA", "item_id": stale}),
+    )
+    .await;
+    let listed = request(&mut client, json!({"type": "queue.list", "request_id": "r5", "pane_id": "w1:pA"})).await;
+    assert_eq!(listed["queues"][0].get("paused"), None, "{listed}");
+}
+
+#[tokio::test]
+async fn an_agent_that_finished_while_herdr_was_disconnected_still_gets_its_prompt() {
+    let herdr = herdr().await;
+    let service = observing(&herdr, None).await;
+    let mut client = connect(&service).await;
+    add(&mut client, "w1:pA", "after reconnecting", PA_SESSION).await;
+
+    let mut finished = recorded("session.snapshot.ndjson");
+    for agent in finished["result"]["snapshot"]["agents"].as_array_mut().unwrap() {
+        if agent["pane_id"] == "w1:pA" {
+            agent["agent_status"] = json!("idle");
+        }
+    }
+    herdr.set_reply("session.snapshot", finished);
+    herdr.end_subscriptions(None);
+
+    herdr.wait_until(|herdr| prompts(herdr).len() == 1).await;
+    assert_eq!(prompts(&herdr)[0], json!({"target": "w1:pA", "text": "after reconnecting"}));
 }

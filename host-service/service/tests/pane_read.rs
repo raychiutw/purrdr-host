@@ -117,3 +117,24 @@ async fn read_only_devices_can_read_the_screen() {
 
     assert_eq!(reply["screen"], "8a58485a53c41e264556371d2d22a46a0343c51f1dd54fe3fc72971bf5cda52f");
 }
+
+#[tokio::test]
+async fn each_platform_reads_its_own_recorded_choice_screen() {
+    let name = if cfg!(windows) {
+        "windows/pane.read.trust-folder.ndjson"
+    } else {
+        "pane.read.trust-folder.ndjson"
+    };
+    let herdr = herdr_replying(recorded(name)).await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    let reply = client
+        .request(json!({"type": "pane.read", "request_id": "r2", "pane_id": "w6:p1", "source": "visible"}))
+        .await;
+
+    let text = reply["text"].as_str().unwrap();
+    assert!(text.contains("Yes, I trust this folder"), "{text}");
+    assert_eq!(reply["screen"].as_str().unwrap().len(), 64);
+}

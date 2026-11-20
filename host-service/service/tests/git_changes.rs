@@ -215,3 +215,20 @@ async fn a_working_directory_outside_a_repository_says_so() {
 
     assert_eq!(reply["code"], "not_git_repository");
 }
+
+#[tokio::test]
+async fn a_working_directory_inside_the_repository_only_sees_its_own_changes() {
+    let repository = garden_repository();
+    let src = repository.path().join("src");
+    let (_herdr, _service, mut client) = connected(&src).await;
+
+    let status = client.request(json!({"type": "git.status", "request_id": "r2", "cwd": path_text(&src)})).await;
+    let diff = client.request(json!({"type": "git.diff", "request_id": "r3", "cwd": path_text(&src)})).await;
+    let outside = client
+        .request(json!({"type": "git.diff", "request_id": "r4", "cwd": path_text(&src), "path": "README.md"}))
+        .await;
+
+    assert_eq!(status["files"], json!([{"path": "src/garden.rs", "change": "untracked"}]));
+    assert_eq!(diff["files"].as_array().unwrap().len(), 1);
+    assert_eq!(outside["files"], json!([]));
+}

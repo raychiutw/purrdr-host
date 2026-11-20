@@ -20,9 +20,9 @@ async fn herdr() -> FakeHerdr {
         ("ping", recorded("ping.ndjson")),
         ("session.snapshot", recorded("session.snapshot.ndjson")),
         ("pane.read", recorded("pane.read.question.ndjson")),
-        ("agent.prompt", json!({"id": "", "result": {"type": "agent_prompted", "delivery": "submitted"}})),
+        ("agent.prompt", recorded("agent.prompt.ndjson")),
         ("pane.send_text", json!({"id": "", "result": {"type": "ok"}})),
-        ("pane.send_keys", json!({"id": "", "result": {"type": "ok"}})),
+        ("pane.send_keys", recorded("pane.send_keys.ndjson")),
     ])
     .await
 }

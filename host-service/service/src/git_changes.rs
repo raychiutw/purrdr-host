@@ -41,6 +41,8 @@ struct Change {
 struct Repository {
     repo: gix::Repository,
     workdir: PathBuf,
+    /// cwd 相對 repo 根目錄的路徑(以 / 分隔;cwd 就是根目錄時是空的):只回這底下的變更。
+    scope: String,
 }
 
 /// 變更清單。
@@ -89,7 +91,17 @@ pub(crate) fn diff(cwd: &Path, only: Option<&str>) -> Result<(Vec<GitFileDiff>, 
 fn open(cwd: &Path) -> Result<Repository, GitFailure> {
     let repo = gix::discover(cwd).map_err(|_| GitFailure::NotRepository)?;
     let workdir = repo.workdir().ok_or(GitFailure::NotRepository)?.to_owned();
-    Ok(Repository { repo, workdir })
+    let scope = match (std::fs::canonicalize(cwd), std::fs::canonicalize(&workdir)) {
+        (Ok(cwd), Ok(root)) => cwd
+            .strip_prefix(&root)
+            .map_err(|_| GitFailure::NotRepository)?
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+        _ => return Err(GitFailure::NotRepository),
+    };
+    Ok(Repository { repo, workdir, scope })
 }
 
 fn read_failure(error: impl std::fmt::Display) -> GitFailure {
@@ -131,6 +143,9 @@ fn changes(repository: &Repository) -> Result<Vec<Change>, GitFailure> {
             head: None,
         });
     }
+    // diff 只限 Agent 的工作目錄:cwd 是 repo 裡的子資料夾時，不回它以外的變更。
+    let scope = &repository.scope;
+    changes.retain(|change| scope.is_empty() || change.path == *scope || change.path.starts_with(&format!("{scope}/")));
     changes.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(changes)
 }

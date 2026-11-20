@@ -85,7 +85,13 @@ async fn connected(herdr: &FakeHerdr, home: &TempDir) -> (TestHostService, TestC
 }
 
 async fn plain_herdr() -> FakeHerdr {
-    FakeHerdr::start(vec![("ping", recorded("ping.ndjson")), ("agent.start", recorded("agent.start.resume.ndjson"))]).await
+    // herdr 0.9.5 在這個平台錄的 resume 啟動(Windows 錄自 Windows 主機)。
+    let started = if cfg!(windows) {
+        recorded("windows/agent.start.resume.ndjson")
+    } else {
+        recorded("agent.start.resume.ndjson")
+    };
+    FakeHerdr::start(vec![("ping", recorded("ping.ndjson")), ("agent.start", started)]).await
 }
 
 #[tokio::test]

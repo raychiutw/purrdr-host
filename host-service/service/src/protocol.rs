@@ -1021,25 +1021,23 @@ pub struct PaneQueue {
 pub struct QueuedPrompt {
     pub item_id: String,
     pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_session: Option<String>,
+    pub expected_session: String,
 }
 
-/// 佇列暫停的原因。session_changed:要送出時 pane 的 Agent session 已不是 expected_session,沒有送出;對這個 pane 的佇列做 add／remove／reorder 後解除，下次 Agent 做完再試。
+/// 佇列暫停的原因。session_changed:要送出時 pane 的 Agent session 已不是第一則的 expected_session,沒有送出;remove 或 reorder 換掉第一則後解除(add 加在後面不解除),下次 Agent 做完再試。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum QueuePause {
     #[serde(rename = "session_changed")]
     SessionChanged,
 }
 
-/// 排一則訊息到 pane 的佇列尾端。每個 pane 最多 20 則(超過回 queue_full),每則最多 64 KiB(UTF-8)。佇列存在狀態資料夾，主機服務重啟後還在;稽核不記內容。
+/// 排一則訊息到 pane 的佇列尾端;expected_session 必填(送出前比對，對象換了就不送)。每個 pane 最多 20 則(超過回 queue_full),每則最多 64 KiB(UTF-8)。佇列存在狀態資料夾，主機服務重啟後還在;稽核不記內容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueAdd {
     pub request_id: String,
     pub pane_id: String,
     pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_session: Option<String>,
+    pub expected_session: String,
 }
 
 /// 已排入佇列。

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::agent_observer::{AgentObserver, MAXIMUM_PROMPT_BYTES, QueueFailure};
+use crate::agent_observer::{AgentObserver, MAXIMUM_PROMPT_BYTES, MAXIMUM_QUEUED_PROMPTS, QueueFailure};
 use crate::audit_log::{AuditEvent, AuditLog, RevokedBy};
 use crate::device_store::{Device, DeviceStore, RevokeFailure};
 use crate::git_changes::{self, GitFailure};
@@ -545,7 +545,7 @@ impl ClientConnection {
             return error(
                 Some(request.request_id),
                 ErrorCode::InvalidMessage,
-                "invalid pane_id or text larger than 64 KiB",
+                &format!("invalid pane_id or text larger than {} KiB", MAXIMUM_PROMPT_BYTES / 1024),
             );
         }
         match observer.add(&request.pane_id, request.text, request.expected_session) {
@@ -1179,7 +1179,11 @@ fn observer_missing(request_id: String) -> ServerMessage {
 
 fn queue_error(request_id: String, failure: QueueFailure) -> ServerMessage {
     match failure {
-        QueueFailure::Full => error(Some(request_id), ErrorCode::QueueFull, "this pane already has 20 queued prompts"),
+        QueueFailure::Full => error(
+            Some(request_id),
+            ErrorCode::QueueFull,
+            &format!("this pane already has {MAXIMUM_QUEUED_PROMPTS} queued prompts"),
+        ),
         QueueFailure::UnknownItem => error(Some(request_id), ErrorCode::QueueItemUnknown, "item_id is not in this queue"),
         QueueFailure::Storage(message) => error(Some(request_id), ErrorCode::InternalError, &message),
     }

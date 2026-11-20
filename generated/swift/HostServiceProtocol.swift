@@ -2180,9 +2180,9 @@ extension HostServiceProtocol {
     public struct QueuedPrompt: Codable, Sendable, Equatable {
         public var itemId: String
         public var text: String
-        public var expectedSession: String?
+        public var expectedSession: String
 
-        public init(itemId: String, text: String, expectedSession: String? = nil) {
+        public init(itemId: String, text: String, expectedSession: String) {
             self.itemId = itemId
             self.text = text
             self.expectedSession = expectedSession
@@ -2197,21 +2197,21 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 佇列暫停的原因。session_changed:要送出時 pane 的 Agent session 已不是 expected_session,沒有送出;對這個 pane 的佇列做 add／remove／reorder 後解除，下次 Agent 做完再試。
+    /// 佇列暫停的原因。session_changed:要送出時 pane 的 Agent session 已不是第一則的 expected_session,沒有送出;remove 或 reorder 換掉第一則後解除(add 加在後面不解除),下次 Agent 做完再試。
     public enum QueuePause: String, Codable, Sendable, CaseIterable {
         case sessionChanged = "session_changed"
     }
 }
 
 extension HostServiceProtocol {
-    /// 排一則訊息到 pane 的佇列尾端。每個 pane 最多 20 則(超過回 queue_full),每則最多 64 KiB(UTF-8)。佇列存在狀態資料夾，主機服務重啟後還在;稽核不記內容。
+    /// 排一則訊息到 pane 的佇列尾端;expected_session 必填(送出前比對，對象換了就不送)。每個 pane 最多 20 則(超過回 queue_full),每則最多 64 KiB(UTF-8)。佇列存在狀態資料夾，主機服務重啟後還在;稽核不記內容。
     public struct QueueAdd: Codable, Sendable, Equatable {
         public var requestId: String
         public var paneId: String
         public var text: String
-        public var expectedSession: String?
+        public var expectedSession: String
 
-        public init(requestId: String, paneId: String, text: String, expectedSession: String? = nil) {
+        public init(requestId: String, paneId: String, text: String, expectedSession: String) {
             self.requestId = requestId
             self.paneId = paneId
             self.text = text
