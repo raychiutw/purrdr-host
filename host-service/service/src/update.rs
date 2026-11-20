@@ -1,6 +1,7 @@
 //! 主機服務的更新流程(raychiutw/purrdr.host#6):「檢查」與「套用」。
 //!
-//! 往外只接兩個介面：Release 來源(`ReleaseSource`)與安裝位置(`InstallLocation`)。
+//! 往外只接兩個介面：Release 來源(`ReleaseSource`)與安裝位置(`InstallLocation`);
+//! 背景自動更新另外問 `AgentActivity`,有 Agent 工作中就延後(raychiutw/purrdr.host#20)。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,8 @@ const GITHUB_LATEST_RELEASE: &str = "https://api.github.com/repos/raychiutw/purr
 pub const RELEASE_URL_VARIABLE: &str = "PURRDR_HOST_SERVICE_RELEASE_URL";
 /// 壓縮檔大小上限(防止下載無止境)。
 const MAXIMUM_DOWNLOAD: u64 = 256 * 1024 * 1024;
+/// 背景自動更新因 Agent 工作中最多連續延後幾次，之後照常更新。
+pub const MAXIMUM_DEFERRALS: u32 = 3;
 
 /// 語意化版本(只接受 `主.次.修`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -220,6 +223,11 @@ pub enum AutomaticOutcome {
     UpToDate(Version),
     /// 這個版本上次更新後退回過，不再自動重試(手動 `update` 仍可)。
     Skipped(Version),
+    /// 有 Agent 正在工作，延後到下次排程(`deferred` 是連續延後的次數)。
+    Deferred {
+        to: Version,
+        deferred: u32,
+    },
     /// 已啟動更新程序(由它套用並記錄結果)。
     Started {
         from: Version,
@@ -231,6 +239,11 @@ pub enum AutomaticOutcome {
 /// 啟動獨立的更新程序(`update --yes`):服務重啟時它不會跟著被結束。
 pub trait UpdateLauncher {
     fn launch(&mut self) -> Result<(), String>;
+}
+
+/// 這台主機現在有沒有 `working` 的 Agent(自動更新據此延後)。
+pub trait AgentActivity {
+    fn has_working_agent(&mut self) -> bool;
 }
 
 /// 更新鎖;drop 時放開。
@@ -279,6 +292,9 @@ pub trait InstallLocation {
     /// 上次更新後退回的版本(不再自動重試)。
     fn rolled_back_version(&mut self) -> Option<Version>;
     fn set_rolled_back_version(&mut self, version: Option<Version>);
+    /// 背景自動更新因 Agent 工作中連續延後的次數。
+    fn deferred_updates(&mut self) -> u32;
+    fn set_deferred_updates(&mut self, count: u32);
     /// 更新成功後刪掉留下的舊執行檔。
     fn discard_previous(&mut self);
 }
@@ -419,7 +435,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
     }
 
     /// 背景自動檢查：開啟且有新版時啟動更新程序(由它套用);結果都記下來。
-    pub fn automatic(&mut self, launcher: &mut impl UpdateLauncher) -> AutomaticOutcome {
+    pub fn automatic(&mut self, launcher: &mut impl UpdateLauncher, agents: &mut impl AgentActivity) -> AutomaticOutcome {
         match self.location.auto_update() {
             Ok(true) => {}
             Ok(false) => return AutomaticOutcome::Disabled,
@@ -427,18 +443,30 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
         }
         let outcome = match self.check().and_then(|check| Ok((check.update_available(), check.versions()?))) {
             Err(error) => AutomaticOutcome::Failed(error),
-            Ok((false, (installed, _))) => AutomaticOutcome::UpToDate(installed),
+            Ok((false, (installed, _))) => {
+                self.location.set_deferred_updates(0);
+                AutomaticOutcome::UpToDate(installed)
+            }
             Ok((true, (_, to))) if self.location.rolled_back_version() == Some(to) => AutomaticOutcome::Skipped(to),
-            Ok((true, (from, to))) => match launcher.launch() {
-                Ok(()) => AutomaticOutcome::Started { from, to },
-                Err(message) => AutomaticOutcome::Failed(UpdateError::Io(format!("cannot start the update: {message}"))),
-            },
+            Ok((true, (_, to))) if self.location.deferred_updates() < MAXIMUM_DEFERRALS && agents.has_working_agent() => {
+                let deferred = self.location.deferred_updates() + 1;
+                self.location.set_deferred_updates(deferred);
+                AutomaticOutcome::Deferred { to, deferred }
+            }
+            Ok((true, (from, to))) => {
+                self.location.set_deferred_updates(0);
+                match launcher.launch() {
+                    Ok(()) => AutomaticOutcome::Started { from, to },
+                    Err(message) => AutomaticOutcome::Failed(UpdateError::Io(format!("cannot start the update: {message}"))),
+                }
+            }
         };
         let result = match &outcome {
             AutomaticOutcome::UpToDate(installed) => format!("up to date ({installed})"),
             AutomaticOutcome::Started { to, .. } => format!("update to {to} started"),
             AutomaticOutcome::Failed(error) => format!("check failed: {}", error.summary()),
             AutomaticOutcome::Skipped(version) => format!("skipped {version}: it was rolled back before (run update to try again)"),
+            AutomaticOutcome::Deferred { to, deferred } => format!("deferred update to {to}: an agent is working ({deferred} in a row)"),
             AutomaticOutcome::Disabled => unreachable!("前面已回傳"),
         };
         self.record(result);
