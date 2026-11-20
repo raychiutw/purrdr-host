@@ -9,6 +9,7 @@ pub mod audit_log;
 pub mod auto_update;
 mod connection;
 pub mod device_store;
+mod git_changes;
 pub mod herdr_cli;
 pub mod herdr_client;
 pub mod herdr_socket;

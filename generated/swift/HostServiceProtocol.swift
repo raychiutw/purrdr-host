@@ -59,6 +59,8 @@ extension HostServiceProtocol {
         case hostServiceSetAutoUpdate(HostServiceSetAutoUpdate)
         case paneRead(PaneRead)
         case sessionsList(SessionsList)
+        case gitStatus(GitStatus)
+        case gitDiff(GitDiff)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -108,6 +110,8 @@ extension HostServiceProtocol {
             case "host_service.set_auto_update": self = .hostServiceSetAutoUpdate(try HostServiceSetAutoUpdate(from: decoder))
             case "pane.read": self = .paneRead(try PaneRead(from: decoder))
             case "sessions.list": self = .sessionsList(try SessionsList(from: decoder))
+            case "git.status": self = .gitStatus(try GitStatus(from: decoder))
+            case "git.diff": self = .gitDiff(try GitDiff(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -236,6 +240,12 @@ extension HostServiceProtocol {
             case .sessionsList(let message):
                 try container.encode("sessions.list", forKey: .type)
                 try message.encode(to: encoder)
+            case .gitStatus(let message):
+                try container.encode("git.status", forKey: .type)
+                try message.encode(to: encoder)
+            case .gitDiff(let message):
+                try container.encode("git.diff", forKey: .type)
+                try message.encode(to: encoder)
             }
         }
 
@@ -294,6 +304,8 @@ extension HostServiceProtocol {
         case errorMessage(ErrorMessage)
         case paneReadResult(PaneReadResult)
         case sessionsListResult(SessionsListResult)
+        case gitStatusResult(GitStatusResult)
+        case gitDiffResult(GitDiffResult)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -345,6 +357,8 @@ extension HostServiceProtocol {
             case "error": self = .errorMessage(try ErrorMessage(from: decoder))
             case "pane.read.result": self = .paneReadResult(try PaneReadResult(from: decoder))
             case "sessions.list.result": self = .sessionsListResult(try SessionsListResult(from: decoder))
+            case "git.status.result": self = .gitStatusResult(try GitStatusResult(from: decoder))
+            case "git.diff.result": self = .gitDiffResult(try GitDiffResult(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -478,6 +492,12 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .sessionsListResult(let message):
                 try container.encode("sessions.list.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .gitStatusResult(let message):
+                try container.encode("git.status.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .gitDiffResult(let message):
+                try container.encode("git.diff.result", forKey: .type)
                 try message.encode(to: encoder)
             }
         }
@@ -1909,6 +1929,151 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
+    /// 唯讀的 git 變更清單(raychiutw/purrdr.host#33):cwd 所在 repo 的工作目錄相對 HEAD 改了哪些檔案。cwd 必須是 herdr session.snapshot 當下回報的 Agent 工作目錄;以程序內函式庫讀取，不執行 git 或任何 filter 程式(所以不套用 clean／smudge 與換行轉換)。
+    public struct GitStatus: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var cwd: String
+
+        public init(requestId: String, cwd: String) {
+            self.requestId = requestId
+            self.cwd = cwd
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case cwd
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 變更的檔案，依路徑排序。
+    public struct GitStatusResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        /// 目前分支的短名稱;detached HEAD 時省略。
+        public var branch: String?
+        public var files: [GitFileChange]
+
+        public init(requestId: String, branch: String? = nil, files: [GitFileChange]) {
+            self.requestId = requestId
+            self.branch = branch
+            self.files = files
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case branch
+            case files
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 一個變更的檔案;path 相對 repo 根目錄，以 / 分隔。
+    public struct GitFileChange: Codable, Sendable, Equatable {
+        public var path: String
+        public var change: GitChangeKind
+
+        public init(path: String, change: GitChangeKind) {
+            self.path = path
+            self.change = change
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case path
+            case change
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 相對 HEAD:added 已加入 index 的新檔、modified 內容不同、deleted 工作目錄沒有了、untracked 沒加入 index 也沒被 .gitignore 排除的新檔。
+    public enum GitChangeKind: String, Codable, Sendable, CaseIterable {
+        case added
+        case modified
+        case deleted
+        case untracked
+    }
+}
+
+extension HostServiceProtocol {
+    /// 唯讀的 git diff(工作目錄相對 HEAD 的 unified diff,前後 3 行)。cwd 規則同 git.status;帶 path 時只回這個檔案(必須是變更清單裡的路徑)。
+    public struct GitDiff: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var cwd: String
+        /// 相對 repo 根目錄的路徑，以 / 分隔。
+        public var path: String?
+
+        public init(requestId: String, cwd: String, path: String? = nil) {
+            self.requestId = requestId
+            self.cwd = cwd
+            self.path = path
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case cwd
+            case path
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 每個變更檔案的 diff。所有 diff 文字合計超過 x-maximum-file-size 時，之後的檔案只列路徑並標 truncated。
+    public struct GitDiffResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var files: [GitFileDiff]
+        public var truncated: Bool
+
+        public init(requestId: String, files: [GitFileDiff], truncated: Bool) {
+            self.requestId = requestId
+            self.files = files
+            self.truncated = truncated
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case files
+            case truncated
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 一個檔案的 diff;沒有 diff 文字時 omitted 說明原因。
+    public struct GitFileDiff: Codable, Sendable, Equatable {
+        public var path: String
+        public var change: GitChangeKind
+        /// unified diff 的 hunk(@@ 開頭，不含 ---／+++ 檔頭)。
+        public var diff: String?
+        public var omitted: GitDiffOmitted?
+
+        public init(path: String, change: GitChangeKind, diff: String? = nil, omitted: GitDiffOmitted? = nil) {
+            self.path = path
+            self.change = change
+            self.diff = diff
+            self.omitted = omitted
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case path
+            case change
+            case diff
+            case omitted
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// binary 二進位檔(含 NUL 或不是 UTF-8);too_large 超過 x-maximum-file-size 或總量已達上限;excluded 路徑在 x-excluded-file-locations 排除清單。
+    public enum GitDiffOmitted: String, Codable, Sendable, CaseIterable {
+        case binary
+        case tooLarge = "too_large"
+        case excluded
+    }
+}
+
+extension HostServiceProtocol {
     /// 一個過去的 session。
     public struct HistorySession: Codable, Sendable, Equatable {
         /// session id,可直接當 agent.start 的 resume_session。
@@ -2817,7 +2982,7 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
     public enum ErrorCode: String, Codable, Sendable, CaseIterable {
         case invalidMessage = "invalid_message"
         case handshakeRequired = "handshake_required"
@@ -2845,6 +3010,8 @@ extension HostServiceProtocol {
         case updateInProgress = "update_in_progress"
         case updateFailed = "update_failed"
         case paneChanged = "pane_changed"
+        case cwdNotAllowed = "cwd_not_allowed"
+        case notGitRepository = "not_git_repository"
         case internalError = "internal_error"
     }
 }

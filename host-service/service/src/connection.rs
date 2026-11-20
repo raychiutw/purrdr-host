@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 
 use crate::audit_log::{AuditEvent, AuditLog, RevokedBy};
 use crate::device_store::{Device, DeviceStore, RevokeFailure};
+use crate::git_changes::{self, GitFailure};
 use crate::herdr_cli::HerdrCli;
 use crate::herdr_client::{HerdrClient, HerdrFailure, HerdrSubscription};
 use crate::host_files::{self, FileAccessCache, FileAccessEnvironment, FileAccessRules, FileSnapshot, Located, Purpose, RequestPacing};
@@ -30,7 +31,7 @@ use crate::protocol::{
     ErrorMessage, EventsEnded, EventsSubscribe, EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus,
     FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, HerdrServer, PROTOCOL_VERSION, PairedDevice, PaneSendKeys,
     PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent, TerminalScrollDirection,
-    SessionsList, SessionsListResult, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
+    GitDiff, GitDiffResult, GitStatus, GitStatusResult, SessionsList, SessionsListResult, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
 use crate::remote_management::{self, ServiceManagement};
@@ -330,6 +331,8 @@ impl ClientConnection {
             ClientMessage::PaneSendText(request) => self.pane_send_text(request).await,
             ClientMessage::PaneRead(request) => pane_screen::read(&self.herdr, request).await,
             ClientMessage::SessionsList(request) => self.sessions_list(request).await,
+            ClientMessage::GitStatus(request) => self.git_status(request).await,
+            ClientMessage::GitDiff(request) => self.git_diff(request).await,
             ClientMessage::AgentPrompt(request) => self.agent_prompt(request).await,
             ClientMessage::EventsSubscribe(request) => self.events_subscribe(request).await,
             ClientMessage::EventsUnsubscribe(request) => {
@@ -517,6 +520,51 @@ impl ClientConnection {
             request_id: request.request_id,
             sessions,
         })
+    }
+
+    /// git.status／git.diff 只讀 herdr 目前回報的 Agent 工作目錄。Err 是要回的錯誤。
+    async fn reported_working_directory(&self, request_id: &str, cwd: &str) -> Result<PathBuf, ServerMessage> {
+        let result = match self.herdr.request("session.snapshot", json!({})).await {
+            Ok(result) => result,
+            Err(failure) => return Err(herdr_error(request_id.to_owned(), "session.snapshot", failure)),
+        };
+        let snapshot = serde_json::from_value::<SnapshotResult>(result).unwrap_or_default().snapshot;
+        if snapshot.agents.iter().any(|agent| agent.cwd.as_deref() == Some(cwd)) {
+            Ok(PathBuf::from(cwd))
+        } else {
+            Err(error(Some(request_id.to_owned()), ErrorCode::CwdNotAllowed, "cwd is not the working directory of an agent herdr reports"))
+        }
+    }
+
+    async fn git_status(&self, request: GitStatus) -> ServerMessage {
+        let cwd = match self.reported_working_directory(&request.request_id, &request.cwd).await {
+            Ok(cwd) => cwd,
+            Err(reply) => return reply,
+        };
+        match blocking(move || git_changes::status(&cwd)).await {
+            Ok(changes) => ServerMessage::GitStatusResult(GitStatusResult {
+                request_id: request.request_id,
+                branch: changes.branch,
+                files: changes.files,
+            }),
+            Err(failure) => git_error(request.request_id, failure),
+        }
+    }
+
+    async fn git_diff(&self, request: GitDiff) -> ServerMessage {
+        let cwd = match self.reported_working_directory(&request.request_id, &request.cwd).await {
+            Ok(cwd) => cwd,
+            Err(reply) => return reply,
+        };
+        let only = request.path.clone();
+        match blocking(move || git_changes::diff(&cwd, only.as_deref())).await {
+            Ok((files, truncated)) => ServerMessage::GitDiffResult(GitDiffResult {
+                request_id: request.request_id,
+                files,
+                truncated,
+            }),
+            Err(failure) => git_error(request.request_id, failure),
+        }
     }
 
     async fn pane_send_text(&self, request: PaneSendText) -> ServerMessage {
@@ -1008,6 +1056,13 @@ pub(crate) fn guard_error(request_id: String, failure: GuardFailure) -> ServerMe
     match failure {
         GuardFailure::Changed(message) => error(Some(request_id), ErrorCode::PaneChanged, &message),
         GuardFailure::Herdr { method, failure } => herdr_error(request_id, method, failure),
+    }
+}
+
+fn git_error(request_id: String, failure: GitFailure) -> ServerMessage {
+    match failure {
+        GitFailure::NotRepository => error(Some(request_id), ErrorCode::NotGitRepository, "cwd is not inside a git working tree"),
+        GitFailure::Read(message) => error(Some(request_id), ErrorCode::InternalError, &message),
     }
 }
 

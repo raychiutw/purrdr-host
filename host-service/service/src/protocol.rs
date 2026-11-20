@@ -101,6 +101,10 @@ pub enum ClientMessage {
     PaneRead(PaneRead),
     #[serde(rename = "sessions.list")]
     SessionsList(SessionsList),
+    #[serde(rename = "git.status")]
+    GitStatus(GitStatus),
+    #[serde(rename = "git.diff")]
+    GitDiff(GitDiff),
 }
 
 impl ClientMessage {
@@ -198,6 +202,10 @@ pub enum ServerMessage {
     PaneReadResult(PaneReadResult),
     #[serde(rename = "sessions.list.result")]
     SessionsListResult(SessionsListResult),
+    #[serde(rename = "git.status.result")]
+    GitStatusResult(GitStatusResult),
+    #[serde(rename = "git.diff.result")]
+    GitDiffResult(GitDiffResult),
 }
 
 /// 握手：連線後第一個請求，帶 app 使用的協定版本。
@@ -888,6 +896,84 @@ pub struct SessionsListResult {
     pub sessions: Vec<HistorySession>,
 }
 
+/// 唯讀的 git 變更清單(raychiutw/purrdr.host#33):cwd 所在 repo 的工作目錄相對 HEAD 改了哪些檔案。cwd 必須是 herdr session.snapshot 當下回報的 Agent 工作目錄;以程序內函式庫讀取，不執行 git 或任何 filter 程式(所以不套用 clean／smudge 與換行轉換)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStatus {
+    pub request_id: String,
+    pub cwd: String,
+}
+
+/// 變更的檔案，依路徑排序。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStatusResult {
+    pub request_id: String,
+    /// 目前分支的短名稱;detached HEAD 時省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub files: Vec<GitFileChange>,
+}
+
+/// 一個變更的檔案;path 相對 repo 根目錄，以 / 分隔。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitFileChange {
+    pub path: String,
+    pub change: GitChangeKind,
+}
+
+/// 相對 HEAD:added 已加入 index 的新檔、modified 內容不同、deleted 工作目錄沒有了、untracked 沒加入 index 也沒被 .gitignore 排除的新檔。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GitChangeKind {
+    #[serde(rename = "added")]
+    Added,
+    #[serde(rename = "modified")]
+    Modified,
+    #[serde(rename = "deleted")]
+    Deleted,
+    #[serde(rename = "untracked")]
+    Untracked,
+}
+
+/// 唯讀的 git diff(工作目錄相對 HEAD 的 unified diff,前後 3 行)。cwd 規則同 git.status;帶 path 時只回這個檔案(必須是變更清單裡的路徑)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitDiff {
+    pub request_id: String,
+    pub cwd: String,
+    /// 相對 repo 根目錄的路徑，以 / 分隔。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// 每個變更檔案的 diff。所有 diff 文字合計超過 x-maximum-file-size 時，之後的檔案只列路徑並標 truncated。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitDiffResult {
+    pub request_id: String,
+    pub files: Vec<GitFileDiff>,
+    pub truncated: bool,
+}
+
+/// 一個檔案的 diff;沒有 diff 文字時 omitted 說明原因。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitFileDiff {
+    pub path: String,
+    pub change: GitChangeKind,
+    /// unified diff 的 hunk(@@ 開頭，不含 ---／+++ 檔頭)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<GitDiffOmitted>,
+}
+
+/// binary 二進位檔(含 NUL 或不是 UTF-8);too_large 超過 x-maximum-file-size 或總量已達上限;excluded 路徑在 x-excluded-file-locations 排除清單。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GitDiffOmitted {
+    #[serde(rename = "binary")]
+    Binary,
+    #[serde(rename = "too_large")]
+    TooLarge,
+    #[serde(rename = "excluded")]
+    Excluded,
+}
+
 /// 一個過去的 session。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySession {
@@ -1303,7 +1389,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
@@ -1358,6 +1444,10 @@ pub enum ErrorCode {
     UpdateFailed,
     #[serde(rename = "pane_changed")]
     PaneChanged,
+    #[serde(rename = "cwd_not_allowed")]
+    CwdNotAllowed,
+    #[serde(rename = "not_git_repository")]
+    NotGitRepository,
     #[serde(rename = "internal_error")]
     InternalError,
 }
