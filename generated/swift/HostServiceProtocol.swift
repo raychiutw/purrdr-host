@@ -45,6 +45,8 @@ extension HostServiceProtocol {
         case pushInstall(PushInstall)
         case pushRemove(PushRemove)
         case pushUpdateMuted(PushUpdateMuted)
+        case devicesList(DevicesList)
+        case devicesRevoke(DevicesRevoke)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -80,6 +82,8 @@ extension HostServiceProtocol {
             case "push.install": self = .pushInstall(try PushInstall(from: decoder))
             case "push.remove": self = .pushRemove(try PushRemove(from: decoder))
             case "push.update_muted": self = .pushUpdateMuted(try PushUpdateMuted(from: decoder))
+            case "devices.list": self = .devicesList(try DevicesList(from: decoder))
+            case "devices.revoke": self = .devicesRevoke(try DevicesRevoke(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -166,13 +170,19 @@ extension HostServiceProtocol {
             case .pushUpdateMuted(let message):
                 try container.encode("push.update_muted", forKey: .type)
                 try message.encode(to: encoder)
+            case .devicesList(let message):
+                try container.encode("devices.list", forKey: .type)
+                try message.encode(to: encoder)
+            case .devicesRevoke(let message):
+                try container.encode("devices.revoke", forKey: .type)
+                try message.encode(to: encoder)
             }
         }
 
         /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
         public var isWrite: Bool {
             switch self {
-            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove, .pushUpdateMuted: return true
+            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove, .pushUpdateMuted, .devicesRevoke: return true
             default: return false
             }
         }
@@ -209,6 +219,8 @@ extension HostServiceProtocol {
         case pushInstallResult(PushInstallResult)
         case pushRemoveResult(PushRemoveResult)
         case pushUpdateMutedResult(PushUpdateMutedResult)
+        case devicesListResult(DevicesListResult)
+        case devicesRevokeResult(DevicesRevokeResult)
         case errorMessage(ErrorMessage)
 
         private enum TypeKey: String, CodingKey {
@@ -246,6 +258,8 @@ extension HostServiceProtocol {
             case "push.install.result": self = .pushInstallResult(try PushInstallResult(from: decoder))
             case "push.remove.result": self = .pushRemoveResult(try PushRemoveResult(from: decoder))
             case "push.update_muted.result": self = .pushUpdateMutedResult(try PushUpdateMutedResult(from: decoder))
+            case "devices.list.result": self = .devicesListResult(try DevicesListResult(from: decoder))
+            case "devices.revoke.result": self = .devicesRevokeResult(try DevicesRevokeResult(from: decoder))
             case "error": self = .errorMessage(try ErrorMessage(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
@@ -335,6 +349,12 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .pushUpdateMutedResult(let message):
                 try container.encode("push.update_muted.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .devicesListResult(let message):
+                try container.encode("devices.list.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .devicesRevokeResult(let message):
+                try container.encode("devices.revoke.result", forKey: .type)
                 try message.encode(to: encoder)
             case .errorMessage(let message):
                 try container.encode("error", forKey: .type)
@@ -1860,6 +1880,109 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
+    /// 列出這台主機已配對的裝置(raychiutw/purrdr.host#19;不含已撤銷的)。唯讀，唯讀裝置也可用。
+    public struct DevicesList: Codable, Sendable, Equatable {
+        public var requestId: String
+
+        public init(requestId: String) {
+            self.requestId = requestId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 已配對的裝置，依配對先後。不含權杖或其雜湊。
+    public struct DevicesListResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var devices: [PairedDevice]
+
+        public init(requestId: String, devices: [PairedDevice]) {
+            self.requestId = requestId
+            self.devices = devices
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case devices
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 一支已配對的裝置。時間是 RFC 3339 UTC(到秒)。
+    public struct PairedDevice: Codable, Sendable, Equatable {
+        public var deviceId: String
+        /// 配對時 app 給的裝置名稱。
+        public var name: String
+        public var readOnly: Bool
+        public var pairedAt: String
+        /// 最後一次 WSS 連線的時間;還沒連過就沒有這欄。
+        public var lastConnectedAt: String?
+        /// 是發出這個請求的裝置。
+        public var current: Bool
+
+        public init(deviceId: String, name: String, readOnly: Bool, pairedAt: String, lastConnectedAt: String? = nil, current: Bool) {
+            self.deviceId = deviceId
+            self.name = name
+            self.readOnly = readOnly
+            self.pairedAt = pairedAt
+            self.lastConnectedAt = lastConnectedAt
+            self.current = current
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case deviceId = "device_id"
+            case name
+            case readOnly = "read_only"
+            case pairedAt = "paired_at"
+            case lastConnectedAt = "last_connected_at"
+            case current
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 撤銷一支已配對的裝置：之後它的每個 WSS 訊息都以 device_token_revoked 與 close code 4401 拒絕。已撤銷的再撤銷一次也成功;不認得的 device_id 回 device_unknown。
+    public struct DevicesRevoke: Codable, Sendable, Equatable {
+        public var requestId: String
+        /// devices.list.result 裡的 device_id。
+        public var deviceId: String
+
+        public init(requestId: String, deviceId: String) {
+            self.requestId = requestId
+            self.deviceId = deviceId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case deviceId = "device_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 已撤銷。
+    public struct DevicesRevokeResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var deviceId: String
+
+        public init(requestId: String, deviceId: String) {
+            self.requestId = requestId
+            self.deviceId = deviceId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case deviceId = "device_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
     /// POST /v1/pair 的本文：以配對碼換裝置權杖。QR code 的內容是 purrdr://pair?address=<HTTPS 位址>&code=<配對碼>。
     public struct PairRequest: Codable, Sendable, Equatable {
         /// 大小寫與連字號不拘，例如 K7QM-2XPA。
@@ -1932,7 +2055,7 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
     public enum ErrorCode: String, Codable, Sendable, CaseIterable {
         case invalidMessage = "invalid_message"
         case handshakeRequired = "handshake_required"
@@ -1954,6 +2077,7 @@ extension HostServiceProtocol {
         case fileChanged = "file_changed"
         case pushPluginFailed = "push_plugin_failed"
         case pushNotPaired = "push_not_paired"
+        case deviceUnknown = "device_unknown"
         case internalError = "internal_error"
     }
 }

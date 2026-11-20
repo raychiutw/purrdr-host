@@ -16,18 +16,18 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::audit_log::{AuditEvent, AuditLog};
-use crate::device_store::Device;
+use crate::audit_log::{AuditEvent, AuditLog, RevokedBy};
+use crate::device_store::{Device, DeviceStore, RevokeFailure};
 use crate::herdr_cli::HerdrCli;
 use crate::herdr_client::{HerdrClient, HerdrFailure, HerdrSubscription};
 use crate::host_files::{self, FileAccessCache, FileAccessEnvironment, FileAccessRules, FileSnapshot, Located, Purpose, RequestPacing};
 use crate::http::{ServiceContext, blocking};
 use crate::pane_terminal::{self, PaneTerminal};
 use crate::protocol::{
-    Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, ErrorCode, ErrorMessage, EventsEnded, EventsSubscribe,
-    EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus, HerdrServer, PROTOCOL_VERSION,
-    PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent,
-    TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
+    Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, DevicesListResult, DevicesRevokeResult, ErrorCode,
+    ErrorMessage, EventsEnded, EventsSubscribe, EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus,
+    HerdrServer, PROTOCOL_VERSION, PairedDevice, PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult,
+    ServerMessage, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
 use crate::transcript::AgentSessionInfo;
@@ -86,6 +86,7 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         file_pacing: RequestPacing::default(),
         file_snapshot: None,
         push: context.push.clone(),
+        devices: context.devices.clone(),
     };
     let handler = tokio::spawn(handle_requests(connection, request_queue, context, device_token));
     // 逾時沒收到任何 frame(含 pong)就當作 app 已經不在。
@@ -216,6 +217,7 @@ struct ClientConnection {
     /// 主機取檔最近一次從頭讀的快照。
     file_snapshot: Option<FileSnapshot>,
     push: PushPlugin,
+    devices: DeviceStore,
 }
 
 impl Drop for ClientConnection {
@@ -329,6 +331,8 @@ impl ClientConnection {
                 push_reply(request.request_id, outcome, PushState::muted_result)
             }
             ClientMessage::PushRemove(request) => push_reply(request.request_id, self.push.unpair(&request.device_id).await, PushState::unpaired_result),
+            ClientMessage::DevicesList(request) => self.devices_list(request.request_id, device).await,
+            ClientMessage::DevicesRevoke(request) => self.devices_revoke(request.request_id, request.device_id, device).await,
             ClientMessage::PaneTerminalClose(close) => {
                 // drop:關閉 stdin(control 等同 release)並結束子行程。
                 self.terminals.remove(&close.stream_id);
@@ -336,6 +340,62 @@ impl ClientConnection {
             }
         };
         Some(reply)
+    }
+
+    /// 已配對(未撤銷)的裝置，不含權杖。
+    async fn devices_list(&self, request_id: String, requester: &Device) -> ServerMessage {
+        let devices = self.devices.clone();
+        let stored_devices = match blocking(move || devices.devices()).await {
+            Ok(stored_devices) => stored_devices,
+            Err(storage_error) => {
+                return error(
+                    Some(request_id),
+                    ErrorCode::InternalError,
+                    &format!("cannot read device store: {storage_error}"),
+                );
+            }
+        };
+        let paired_devices = stored_devices
+            .into_iter()
+            .filter(|stored| stored.revoked_at.is_none())
+            .map(|stored| PairedDevice {
+                current: stored.device_id == requester.device_id,
+                device_id: stored.device_id,
+                name: stored.name,
+                read_only: stored.read_only,
+                paired_at: rfc3339(stored.paired_at),
+                last_connected_at: stored.last_connected_at.map(rfc3339),
+            })
+            .collect();
+        ServerMessage::DevicesListResult(DevicesListResult {
+            request_id,
+            devices: paired_devices,
+        })
+    }
+
+    /// 撤銷指定裝置;它的下一個訊息由每則重新驗證拒絕(4401)。
+    async fn devices_revoke(&self, request_id: String, device_id: String, requester: &Device) -> ServerMessage {
+        let devices = self.devices.clone();
+        let target_device_id = device_id.clone();
+        match blocking(move || devices.revoke(&target_device_id, SystemTime::now())).await {
+            Ok(_) => {
+                self.audit.record(
+                    AuditEvent::Revoked {
+                        device_id: device_id.clone(),
+                        by: RevokedBy::App,
+                        by_device_id: Some(requester.device_id.clone()),
+                    },
+                    SystemTime::now(),
+                );
+                ServerMessage::DevicesRevokeResult(DevicesRevokeResult { request_id, device_id })
+            }
+            Err(RevokeFailure::UnknownDevice) => error(Some(request_id), ErrorCode::DeviceUnknown, "no paired device has this id"),
+            Err(RevokeFailure::Storage(storage_error)) => error(
+                Some(request_id),
+                ErrorCode::InternalError,
+                &format!("cannot update device store: {storage_error}"),
+            ),
+        }
     }
 
     /// 開著的 Pane 終端機;已關閉或不存在時略過那個訊息。
@@ -827,6 +887,10 @@ fn push_reply(request_id: String, outcome: Result<PushState, PushFailure>, resul
         Err(PushFailure::NotPaired) => error(Some(request_id), ErrorCode::PushNotPaired, "this device has no push pairing on this host"),
         Err(PushFailure::Internal(message)) => error(Some(request_id), ErrorCode::InternalError, &message),
     }
+}
+
+fn rfc3339(time: SystemTime) -> String {
+    humantime::format_rfc3339_seconds(time).to_string()
 }
 
 fn error(request_id: Option<String>, code: ErrorCode, message: &str) -> ServerMessage {
