@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::connection::{error, herdr_error};
-use crate::herdr_client::HerdrClient;
+use crate::herdr_client::{HerdrClient, HerdrFailure};
 use crate::pane_terminal;
 use crate::protocol::{ErrorCode, PaneRead, PaneReadFormat, PaneReadResult, PaneReadSource, ServerMessage};
 use crate::text_format::hex;
@@ -42,6 +42,14 @@ pub(crate) async fn read(herdr: &HerdrClient, request: PaneRead) -> ServerMessag
         },
         Err(failure) => herdr_error(request.request_id, "pane.read", failure),
     }
+}
+
+/// 目前可見區(text)的指紋;送出前比對與卡住偵測用。
+pub(crate) async fn current_fingerprint(herdr: &HerdrClient, pane_id: &str) -> Result<String, HerdrFailure> {
+    let result = herdr.request("pane.read", json!({"pane_id": pane_id, "source": "visible", "format": "text"})).await?;
+    read_text(&result)
+        .map(|(text, _)| fingerprint(&text))
+        .ok_or_else(|| HerdrFailure::UnexpectedResponse("herdr pane.read returned no text".to_owned()))
 }
 
 fn read_text(result: &Value) -> Option<(String, bool)> {

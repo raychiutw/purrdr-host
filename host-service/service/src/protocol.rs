@@ -297,6 +297,12 @@ pub struct PaneSendKeys {
     pub pane_id: String,
     /// herdr 鍵名，例如 enter、esc、ctrl+c。
     pub keys: Vec<String>,
+    /// app 看到的 herdr agent_session id(raychiutw/purrdr.host#29)。帶了就先讀 session.snapshot 比對，這個 pane 的 Agent session 不同(或已沒有 Agent)時不送，回 pane_changed;沒帶時照送。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_session: Option<String>,
+    /// app 看到的畫面指紋(pane.read 以 source visible、format text 回的 screen)。帶了就先讀畫面比對，不同時不送，回 pane_changed;回答選擇題時用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_screen: Option<String>,
 }
 
 /// 按鍵已送到 Pane。
@@ -654,6 +660,12 @@ pub struct PaneSendText {
     pub request_id: String,
     pub pane_id: String,
     pub text: String,
+    /// app 看到的 herdr agent_session id(raychiutw/purrdr.host#29)。帶了就先讀 session.snapshot 比對，這個 pane 的 Agent session 不同(或已沒有 Agent)時不送，回 pane_changed;沒帶時照送。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_session: Option<String>,
+    /// app 看到的畫面指紋(pane.read 以 source visible、format text 回的 screen)。帶了就先讀畫面比對，不同時不送，回 pane_changed;回答選擇題時用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_screen: Option<String>,
 }
 
 /// 文字已送到 Pane。
@@ -715,6 +727,12 @@ pub struct AgentPrompt {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<PromptWait>,
+    /// app 看到的 herdr agent_session id(raychiutw/purrdr.host#29)。帶了就先讀 session.snapshot 比對，這個 pane 的 Agent session 不同(或已沒有 Agent)時不送，回 pane_changed;沒帶時照送。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_session: Option<String>,
+    /// app 看到的畫面指紋(pane.read 以 source visible、format text 回的 screen)。帶了就先讀畫面比對，不同時不送，回 pane_changed;回答選擇題時用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_screen: Option<String>,
 }
 
 /// herdr agent.prompt 的 wait:等 Agent 進入其中一個狀態;主機服務等 herdr 的時間隨 timeout_ms 延長。
@@ -1241,7 +1259,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
@@ -1294,6 +1312,8 @@ pub enum ErrorCode {
     UpdateInProgress,
     #[serde(rename = "update_failed")]
     UpdateFailed,
+    #[serde(rename = "pane_changed")]
+    PaneChanged,
     #[serde(rename = "internal_error")]
     InternalError,
 }

@@ -22,6 +22,7 @@ use crate::herdr_cli::HerdrCli;
 use crate::herdr_client::{HerdrClient, HerdrFailure, HerdrSubscription};
 use crate::host_files::{self, FileAccessCache, FileAccessEnvironment, FileAccessRules, FileSnapshot, Located, Purpose, RequestPacing};
 use crate::http::{ServiceContext, blocking};
+use crate::pane_guard::{self, GuardFailure};
 use crate::pane_screen;
 use crate::pane_terminal::{self, PaneTerminal};
 use crate::protocol::{
@@ -501,6 +502,9 @@ impl ClientConnection {
     }
 
     async fn pane_send_text(&self, request: PaneSendText) -> ServerMessage {
+        if let Err(failure) = pane_guard::check(&self.herdr, &request.pane_id, request.expected_session.as_deref(), request.expected_screen.as_deref()).await {
+            return guard_error(request.request_id, failure);
+        }
         let params = json!({"pane_id": request.pane_id, "text": request.text});
         match self.herdr.request("pane.send_text", params).await {
             Ok(_) => ServerMessage::PaneSendTextResult(PaneSendTextResult {
@@ -511,6 +515,9 @@ impl ClientConnection {
     }
 
     async fn agent_prompt(&self, request: AgentPrompt) -> ServerMessage {
+        if let Err(failure) = pane_guard::check(&self.herdr, &request.pane_id, request.expected_session.as_deref(), request.expected_screen.as_deref()).await {
+            return guard_error(request.request_id, failure);
+        }
         let mut params = json!({"target": request.pane_id, "text": request.text});
         let mut herdr_wait = Duration::ZERO;
         if let Some(wait) = request.wait {
@@ -808,6 +815,9 @@ impl ClientConnection {
     }
 
     async fn pane_send_keys(&self, request: PaneSendKeys) -> ServerMessage {
+        if let Err(failure) = pane_guard::check(&self.herdr, &request.pane_id, request.expected_session.as_deref(), request.expected_screen.as_deref()).await {
+            return guard_error(request.request_id, failure);
+        }
         let params = json!({"pane_id": request.pane_id, "keys": request.keys});
         match self.herdr.request("pane.send_keys", params).await {
             Ok(_) => ServerMessage::PaneSendKeysResult(PaneSendKeysResult {
@@ -972,6 +982,14 @@ pub(crate) fn herdr_error(request_id: String, method: &str, failure: HerdrFailur
             herdr_error.herdr_code = Some(code);
             ServerMessage::ErrorMessage(herdr_error)
         }
+    }
+}
+
+/// 送出前比對不通過時的錯誤：對象變了回 pane_changed,讀不到 herdr 照一般 herdr 錯誤。
+pub(crate) fn guard_error(request_id: String, failure: GuardFailure) -> ServerMessage {
+    match failure {
+        GuardFailure::Changed(message) => error(Some(request_id), ErrorCode::PaneChanged, &message),
+        GuardFailure::Herdr { method, failure } => herdr_error(request_id, method, failure),
     }
 }
 

@@ -17,6 +17,7 @@ pub mod host_path_mentions;
 mod http;
 pub mod install;
 pub mod management;
+mod pane_guard;
 mod pane_screen;
 mod pane_terminal;
 mod push_plugin;
