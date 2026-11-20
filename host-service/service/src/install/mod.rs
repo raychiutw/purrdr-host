@@ -12,6 +12,7 @@ mod command;
 mod location;
 pub mod system;
 mod tailscale;
+mod user_path;
 
 pub use command::run_command;
 pub use location::{HelperLauncher, InstalledService};
@@ -114,6 +115,8 @@ pub struct HostEnvironment {
     pub user_name: Option<String>,
     /// 正在執行的執行檔。
     pub current_executable: PathBuf,
+    /// 使用者的 shell(`SHELL`,macOS／Linux 決定把 PATH 寫進哪個設定檔)。
+    pub shell: Option<String>,
 }
 
 impl HostEnvironment {
@@ -128,6 +131,7 @@ impl HostEnvironment {
             xdg_config_home: non_empty("XDG_CONFIG_HOME").map(PathBuf::from),
             user_name: non_empty(if platform == InstallPlatform::Windows { "USERNAME" } else { "USER" }),
             current_executable,
+            shell: non_empty("SHELL"),
         })
     }
 
@@ -149,6 +153,8 @@ pub enum InstallCommand {
         assume_yes: bool,
         /// `--no-auto-update`:關閉自動更新。
         no_auto_update: bool,
+        /// `--no-path`:不加進使用者 PATH。
+        no_path: bool,
     },
     Uninstall,
     Status,
@@ -201,7 +207,7 @@ impl InstallCommand {
 
     fn parse_install(options: &[String]) -> Result<Self, String> {
         let (mut port, mut herdr_session, mut https_port, mut assume_yes) = (crate::DEFAULT_PORT, None, None, false);
-        let mut no_auto_update = false;
+        let (mut no_auto_update, mut no_path) = (false, false);
         let mut remaining = options.iter();
         while let Some(option) = remaining.next() {
             let mut value = || remaining.next().ok_or_else(|| format!("{option} needs a value"));
@@ -222,6 +228,7 @@ impl InstallCommand {
                 "--session" => herdr_session = Some(value()?.clone()),
                 "--yes" => assume_yes = true,
                 "--no-auto-update" => no_auto_update = true,
+                "--no-path" => no_path = true,
                 other => return Err(format!("unknown argument: {other}")),
             }
         }
@@ -231,6 +238,7 @@ impl InstallCommand {
             https_port,
             assume_yes,
             no_auto_update,
+            no_path,
         })
     }
 }
@@ -244,6 +252,8 @@ pub struct InstallOptions {
     pub https_port: Option<u16>,
     /// `--no-auto-update` 時 `Some(false)`;`None` 時沿用上次安裝，或開啟。
     pub auto_update: Option<bool>,
+    /// `--no-path` 時 `Some(false)`;`None` 時沿用上次安裝，或加進 PATH。
+    pub add_to_path: Option<bool>,
     /// 放下載的執行檔的資料夾。
     pub source_directory: PathBuf,
 }
@@ -282,6 +292,8 @@ pub struct Installed {
     pub warnings: Vec<String>,
     /// 產生配對碼的指令(安裝好的執行檔 `pair`)。
     pub pair_command: String,
+    /// `bin/` 已加進使用者 PATH(`--no-path` 時 false)。
+    pub added_to_path: bool,
 }
 
 impl std::fmt::Display for Installed {
@@ -294,7 +306,11 @@ impl std::fmt::Display for Installed {
             formatter,
             "  2. In Purrdr, tap Add host -> HTTPS and scan the QR code (or enter {} and the pairing code).",
             self.https_address
-        )
+        )?;
+        if self.added_to_path {
+            write!(formatter, "\nAdded to your PATH: open a new terminal to run purrdr-host-service directly.")?;
+        }
+        Ok(())
     }
 }
 
@@ -307,6 +323,7 @@ pub fn rerun_install_command(prefix: &str, command: &InstallCommand, platform: I
         https_port,
         assume_yes,
         no_auto_update,
+        no_path,
     } = command
     else {
         return prefix.to_owned();
@@ -323,6 +340,9 @@ pub fn rerun_install_command(prefix: &str, command: &InstallCommand, platform: I
     }
     if *no_auto_update {
         parts.push("--no-auto-update".to_owned());
+    }
+    if *no_path {
+        parts.push("--no-path".to_owned());
     }
     if let Some(https_port) = https_port {
         parts.push(format!("{HTTPS_PORT_OPTION} {https_port}"));
@@ -535,6 +555,12 @@ struct InstallRecord {
     /// 背景自動更新(0.5.0 以前的紀錄沒有這欄，視為開啟)。
     #[serde(default = "enabled")]
     auto_update: bool,
+    /// 把 `bin/` 加進使用者 PATH(`--no-path` 關閉;0.6.0 以前的紀錄沒有這欄，視為開啟)。
+    #[serde(default = "enabled")]
+    add_to_path: bool,
+    /// 安裝對 PATH 做的變更。
+    #[serde(default)]
+    path: user_path::PathChange,
 }
 
 fn enabled() -> bool {
@@ -634,6 +660,8 @@ impl<S: HostSystem> Installer<S> {
             serve_configured: previous.as_ref().is_some_and(|record| record.serve_configured),
             created_directories: previous.as_ref().map(|record| record.created_directories.clone()).unwrap_or_default(),
             auto_update: options.auto_update.or(previous.as_ref().map(|record| record.auto_update)).unwrap_or(true),
+            add_to_path: options.add_to_path.or(previous.as_ref().map(|record| record.add_to_path)).unwrap_or(true),
+            path: previous.as_ref().map(|record| record.path.clone()).unwrap_or_default(),
         };
         if previous.is_some() {
             // 先停掉執行中的舊版，執行檔才換得掉(Windows)。
@@ -658,6 +686,7 @@ impl<S: HostSystem> Installer<S> {
             https_address: record.https_address,
             warnings,
             pair_command: format!("{} pair", shell_quoted(&layout.executable(), self.environment.platform)),
+            added_to_path: record.add_to_path,
         })
     }
 
@@ -724,6 +753,18 @@ impl<S: HostSystem> Installer<S> {
             tailscale.serve(&mut self.system, record.https_port, options.port)?;
         }
 
+        if record.add_to_path {
+            if let Some(profile) = user_path::shell_profile(layout, self.environment.shell.as_deref()) {
+                let directory = profile
+                    .parent()
+                    .ok_or_else(|| InstallError::Io(format!("cannot find the folder of {}", profile.display())))?;
+                self.create_directory(directory, record)?;
+            }
+            user_path::add(&mut self.system, layout, self.environment.shell.as_deref(), &mut record.path)?;
+        } else {
+            user_path::remove(&mut self.system, layout, &mut record.path)?;
+        }
+
         if let Some(registration) = autostart::registration_file(layout) {
             self.create_directory(registration.parent().unwrap(), record)?;
         }
@@ -739,6 +780,7 @@ impl<S: HostSystem> Installer<S> {
     /// 安裝失敗時盡力還原;還原本身的錯誤不蓋過原本的錯誤。
     fn roll_back(&mut self, layout: &ServiceLayout, tailscale: &Tailscale, record: &InstallRecord) {
         let _ = autostart::unregister(&mut self.system, layout, self.environment.user_name.as_deref());
+        let _ = user_path::remove(&mut self.system, layout, &mut record.path.clone());
         if record.serve_configured {
             let _ = tailscale.remove_serve(&mut self.system, record.https_port, record.port);
         }
@@ -785,10 +827,11 @@ impl<S: HostSystem> Installer<S> {
     /// 移除自動啟動、`tailscale serve` 設定與主機服務的檔案;還原不了的項目列在 `warnings`。
     pub fn uninstall(&mut self) -> Result<Uninstalled, InstallError> {
         let layout = self.layout();
-        let record = self.read_record(&layout)?.ok_or(InstallError::NotInstalled)?;
+        let mut record = self.read_record(&layout)?.ok_or(InstallError::NotInstalled)?;
         let mut warnings = Vec::new();
 
         autostart::unregister(&mut self.system, &layout, self.environment.user_name.as_deref())?;
+        user_path::remove(&mut self.system, &layout, &mut record.path)?;
         if record.serve_configured {
             let removed = Tailscale::locate(&mut self.system, self.environment.platform)
                 .and_then(|tailscale| tailscale.remove_serve(&mut self.system, record.https_port, record.port));

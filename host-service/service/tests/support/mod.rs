@@ -363,6 +363,15 @@ pub async fn start_service_with_herdr_cli(herdr_socket: HerdrSocket, herdr_cli: 
     start_service_with(herdr_socket, herdr_cli, Heartbeat::default(), TranscriptEnvironment::default()).await
 }
 
+/// 推播外掛的測試：herdr CLI 是假的，家目錄(`~/.purrdr/push-*`)是暫存資料夾。
+pub async fn start_service_with_herdr_cli_and_home(herdr_socket: HerdrSocket, herdr_cli: HerdrCli, home: PathBuf) -> TestHostService {
+    let transcripts = TranscriptEnvironment {
+        home: Some(home),
+        ..TranscriptEnvironment::default()
+    };
+    start_service_with(herdr_socket, herdr_cli, Heartbeat::default(), transcripts).await
+}
+
 /// 主機取檔的測試：對話紀錄位置、主機的暫存目錄(`TMPDIR`／`TEMP`)與主機服務資料夾都可指定。
 pub struct FileServiceOptions {
     pub transcripts: TranscriptEnvironment,

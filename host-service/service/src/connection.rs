@@ -29,6 +29,7 @@ use crate::protocol::{
     PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent,
     TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
+use crate::push_plugin::{PushFailure, PushPlugin, PushState};
 use crate::transcript::AgentSessionInfo;
 use crate::transcript_session::TranscriptSession;
 
@@ -84,6 +85,7 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         file_cache: Arc::new(std::sync::Mutex::new(FileAccessCache::default())),
         file_pacing: RequestPacing::default(),
         file_snapshot: None,
+        push: context.push.clone(),
     };
     let handler = tokio::spawn(handle_requests(connection, request_queue, context, device_token));
     // 逾時沒收到任何 frame(含 pong)就當作 app 已經不在。
@@ -213,6 +215,7 @@ struct ClientConnection {
     file_pacing: RequestPacing,
     /// 主機取檔最近一次從頭讀的快照。
     file_snapshot: Option<FileSnapshot>,
+    push: PushPlugin,
 }
 
 impl Drop for ClientConnection {
@@ -312,6 +315,16 @@ impl ClientConnection {
             }
             ClientMessage::FileStat(request) => self.file_stat(request, device).await,
             ClientMessage::FileRead(request) => self.file_read(request, device).await,
+            ClientMessage::PushStatus(request) => push_reply(request.request_id, self.push.status(&request.device_id).await, PushState::status_result),
+            ClientMessage::PushInstall(request) => {
+                let outcome = self.push.pair(&request.device_id, &request.pairing).await;
+                push_reply(request.request_id, outcome, PushState::paired_result)
+            }
+            ClientMessage::PushUpdateMuted(request) => {
+                let outcome = self.push.update_muted(&request.device_id, request.muted).await;
+                push_reply(request.request_id, outcome, PushState::muted_result)
+            }
+            ClientMessage::PushRemove(request) => push_reply(request.request_id, self.push.unpair(&request.device_id).await, PushState::unpaired_result),
             ClientMessage::PaneTerminalClose(close) => {
                 // drop:關閉 stdin(control 等同 release)並結束子行程。
                 self.terminals.remove(&close.stream_id);
@@ -797,6 +810,18 @@ fn error_message(request_id: Option<String>, code: ErrorCode, message: &str) -> 
         message: message.to_owned(),
         herdr_code: None,
         supported_protocol_versions: None,
+    }
+}
+
+/// 推播外掛代裝的結果轉成回應或錯誤。
+fn push_reply(request_id: String, outcome: Result<PushState, PushFailure>, result: impl FnOnce(String, PushState) -> ServerMessage) -> ServerMessage {
+    match outcome {
+        Ok(state) => result(request_id, state),
+        Err(PushFailure::InvalidRequest(message)) => error(Some(request_id), ErrorCode::InvalidMessage, message),
+        Err(PushFailure::HerdrUnavailable(message)) => error(Some(request_id), ErrorCode::HerdrUnavailable, &message),
+        Err(PushFailure::Herdr(message)) => error(Some(request_id), ErrorCode::PushPluginFailed, &message),
+        Err(PushFailure::NotPaired) => error(Some(request_id), ErrorCode::PushNotPaired, "this device has no push pairing on this host"),
+        Err(PushFailure::Internal(message)) => error(Some(request_id), ErrorCode::InternalError, &message),
     }
 }
 

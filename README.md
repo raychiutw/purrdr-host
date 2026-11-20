@@ -24,7 +24,7 @@ Windows(PowerShell):
 irm https://github.com/raychiutw/purrdr.host/releases/latest/download/install.ps1 | iex
 ```
 
-腳本會下載這台電腦的執行檔、以 `SHA256SUMS` 驗證，再執行 `purrdr-host-service install`(檢查 Tailscale、設定自動啟動，不需要 sudo／系統管理員)。完整說明(前置條件、配對、更新與解除安裝):https://raychiutw.github.io/purrdr/host-service/
+腳本會下載這台電腦的執行檔、以 `SHA256SUMS` 驗證，再執行 `purrdr-host-service install`(檢查 Tailscale、設定自動啟動，不需要 sudo／系統管理員)。安裝時會把主機服務加進使用者的 PATH(Windows 是使用者環境變數，macOS／Linux 是你的 shell 設定檔裡標記起來的一段),**重開終端機後就能直接打 `purrdr-host-service`**;不想改 PATH 就在安裝時加 `--no-path`,解除安裝會移除。完整說明(前置條件、配對、更新與解除安裝):https://raychiutw.github.io/purrdr/host-service/
 
 ### 更新
 
@@ -75,7 +75,7 @@ Windows (PowerShell):
 irm https://github.com/raychiutw/purrdr.host/releases/latest/download/install.ps1 | iex
 ```
 
-The script downloads the build for your computer, verifies it against `SHA256SUMS`, then runs `purrdr-host-service install` (checks Tailscale and sets up autostart; no sudo or administrator needed). Full guide (requirements, pairing, updating and uninstalling): https://raychiutw.github.io/purrdr/host-service/
+The script downloads the build for your computer, verifies it against `SHA256SUMS`, then runs `purrdr-host-service install` (checks Tailscale and sets up autostart; no sudo or administrator needed). It also adds the host service to your user PATH (the user environment variable on Windows, a marked block in your shell's profile on macOS / Linux), so **after opening a new terminal you can run `purrdr-host-service` directly**; install with `--no-path` to leave PATH alone. Uninstalling removes it. Full guide (requirements, pairing, updating and uninstalling): https://raychiutw.github.io/purrdr/host-service/
 
 ### Updating
 

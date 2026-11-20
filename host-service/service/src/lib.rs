@@ -17,6 +17,7 @@ mod http;
 pub mod install;
 pub mod management;
 mod pane_terminal;
+mod push_plugin;
 #[rustfmt::skip] // 由 codegen 產生。
 pub mod protocol;
 pub mod running_service;
@@ -41,7 +42,7 @@ pub struct HostServiceConfig {
     /// 0 表示由系統挑一個空的埠(測試用)。
     pub port: u16,
     pub herdr_socket: HerdrSocket,
-    /// Pane 終端機執行的 herdr CLI。
+    /// Pane 終端機與推播外掛代裝執行的 herdr CLI。
     pub herdr_cli: HerdrCli,
     /// 裝置、配對碼與稽核紀錄所在的資料夾。
     pub state_directory: PathBuf,
@@ -138,6 +139,7 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
     let local_addr = listener.local_addr()?;
     let router = http::router(http::ServiceContext {
         herdr: HerdrClient::new(config.herdr_socket),
+        push: push_plugin::PushPlugin::new(config.herdr_cli.clone(), config.transcripts.home.clone()),
         herdr_cli: config.herdr_cli,
         devices: DeviceStore::new(&config.state_directory),
         audit: AuditLog::new(&config.state_directory),

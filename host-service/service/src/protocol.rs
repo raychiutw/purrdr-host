@@ -57,12 +57,20 @@ pub enum ClientMessage {
     FileStat(FileStat),
     #[serde(rename = "file.read")]
     FileRead(FileRead),
+    #[serde(rename = "push.status")]
+    PushStatus(PushStatus),
+    #[serde(rename = "push.install")]
+    PushInstall(PushInstall),
+    #[serde(rename = "push.remove")]
+    PushRemove(PushRemove),
+    #[serde(rename = "push.update_muted")]
+    PushUpdateMuted(PushUpdateMuted),
 }
 
 impl ClientMessage {
     /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
     pub fn is_write(&self) -> bool {
-        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_))
+        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_))
     }
 }
 
@@ -108,6 +116,14 @@ pub enum ServerMessage {
     FileStatResult(FileStatResult),
     #[serde(rename = "file.read.result")]
     FileReadResult(FileReadResult),
+    #[serde(rename = "push.status.result")]
+    PushStatusResult(PushStatusResult),
+    #[serde(rename = "push.install.result")]
+    PushInstallResult(PushInstallResult),
+    #[serde(rename = "push.remove.result")]
+    PushRemoveResult(PushRemoveResult),
+    #[serde(rename = "push.update_muted.result")]
+    PushUpdateMutedResult(PushUpdateMutedResult),
     #[serde(rename = "error")]
     ErrorMessage(ErrorMessage),
 }
@@ -619,6 +635,92 @@ pub struct FileReadResult {
     pub bytes: Option<String>,
 }
 
+/// 推播外掛代裝(raychiutw/purrdr.ios#261,0.6.0 起):查 herdr 是否已安裝推播外掛(purrdr.push)、這支裝置在這台主機是否已有推播配對(~/.purrdr/push-<device_id>/pairing)、其他已配對裝置數。唯讀，唯讀裝置也可用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushStatus {
+    pub request_id: String,
+    /// app 的推播裝置 id(與 SSH 路徑相同):1–64 個小寫英數與 -,不能是 plugin。不合格回 invalid_message。
+    pub device_id: String,
+}
+
+/// 開啟這支裝置在這台主機的通知：寫入推播配對(與 SSH 路徑相同的 ~/.purrdr/push-<device_id>/pairing,已有就覆寫),外掛還沒安裝就以本機使用者身分執行 herdr plugin install raychiutw/purrdr.host/host-plugin --yes(來源固定，app 不能指定)。安裝失敗時還原成寫入前的樣子(原有的配對保留)並回 push_plugin_failed。重送一律代表「以這把 key 重新配對」(覆寫配對檔;外掛已裝就不重裝)。只改靜音請用 push.update_muted。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushInstall {
+    pub request_id: String,
+    /// app 的推播裝置 id(與 SSH 路徑相同):1–64 個小寫英數與 -,不能是 plugin。不合格回 invalid_message。
+    pub device_id: String,
+    pub pairing: PushPairing,
+}
+
+/// 關閉這支裝置在這台主機的通知：只移除這支裝置的配對資料夾;沒有其他裝置的配對、且外掛是 Purrdr 裝的(~/.purrdr/push-plugin/ 的紀錄)才執行 herdr plugin uninstall purrdr.push。使用者自己裝的外掛不動。外掛移除失敗回 push_plugin_failed(配對已移除)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushRemove {
+    pub request_id: String,
+    /// app 的推播裝置 id(與 SSH 路徑相同):1–64 個小寫英數與 -,不能是 plugin。不合格回 invalid_message。
+    pub device_id: String,
+}
+
+/// 推播配對檔的內容(app 的 PushPairingFile):主機服務寫成 purrdr-push 1、endpoint=、key=、muted= 各一行。endpoint 必須是 https:// 開頭、不含空白與控制字元;key 是 64 位小寫 hex;muted 不能含控制字元。不合格回 invalid_message。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushPairing {
+    /// 後台 /v1/push 的網址。
+    pub endpoint: String,
+    /// 推播配對密鑰(64 位小寫 hex);只寫進主機上的配對檔，不記進稽核紀錄。
+    pub key: String,
+    /// 這支裝置靜音的聊天(Agent 的 session 值)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<Vec<String>>,
+}
+
+/// 這台主機的推播狀態。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushStatusResult {
+    pub request_id: String,
+    /// herdr 已安裝 purrdr.push(不論是誰裝的)。
+    pub plugin_installed: bool,
+    /// 這支裝置在這台主機有推播配對。
+    pub paired: bool,
+    /// 其他已配對裝置數(不含這支;不提供其他裝置的識別資訊)。
+    pub other_devices: i64,
+}
+
+/// 開啟完成，帶完成後的推播狀態(欄位同 push.status.result)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushInstallResult {
+    pub request_id: String,
+    pub plugin_installed: bool,
+    pub paired: bool,
+    pub other_devices: i64,
+}
+
+/// 關閉完成，帶完成後的推播狀態(欄位同 push.status.result)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushRemoveResult {
+    pub request_id: String,
+    pub plugin_installed: bool,
+    pub paired: bool,
+    pub other_devices: i64,
+}
+
+/// 同步這支裝置在這台主機的靜音清單(app 不保存配對密鑰，不能重送 push.install):只以原子方式改寫配對檔的 muted 行，保留 key 與 endpoint,不呼叫 herdr。沒有配對檔回 push_not_paired;muted 含控制字元或空字串回 invalid_message。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushUpdateMuted {
+    pub request_id: String,
+    /// 同 push.install 的 device_id。
+    pub device_id: String,
+    /// 靜音的聊天(Agent 的 session 值),整份取代;空陣列表示取消全部靜音。
+    pub muted: Vec<String>,
+}
+
+/// 靜音已更新。不問 herdr,plugin_installed 一律是 true(要確認外掛請用 push.status)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushUpdateMutedResult {
+    pub request_id: String,
+    pub plugin_installed: bool,
+    pub paired: bool,
+    pub other_devices: i64,
+}
+
 /// POST /v1/pair 的本文：以配對碼換裝置權杖。QR code 的內容是 purrdr://pair?address=<HTTPS 位址>&code=<配對碼>。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairRequest {
@@ -653,7 +755,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
@@ -692,6 +794,10 @@ pub enum ErrorCode {
     TranscriptCompressed,
     #[serde(rename = "file_changed")]
     FileChanged,
+    #[serde(rename = "push_plugin_failed")]
+    PushPluginFailed,
+    #[serde(rename = "push_not_paired")]
+    PushNotPaired,
     #[serde(rename = "internal_error")]
     InternalError,
 }
