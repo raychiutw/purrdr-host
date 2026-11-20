@@ -1,12 +1,13 @@
 //! 主機服務不提供任意指令執行、不呼叫 `herdr remote-api-bridge`(ADR-0010):直接連 herdr socket。
 //! 例外只有本機的安裝指令(#62)執行 tailscale、launchctl 等固定程式(`install/system.rs`),
-//! 以及 Pane 終端機(#61)以子行程執行 `herdr terminal session control|observe`(`pane_terminal.rs`)。
+//! Pane 終端機(#61)以子行程執行 `herdr terminal session control|observe`(`pane_terminal.rs`),
+//! 以及推播外掛代裝(raychiutw/purrdr.ios#261)執行 `herdr plugin list|install|uninstall`(`push_plugin.rs`)。
 
 use std::path::{Path, PathBuf};
 
 const FORBIDDEN: [&str; 5] = ["remote-api-bridge", "std::process::Command", "tokio::process", "Command::new", "process::Stdio"];
 /// 可以執行子行程的檔案(相對 `src/`)。
-const PROCESS_ALLOWED: [&str; 2] = ["install/system.rs", "pane_terminal.rs"];
+const PROCESS_ALLOWED: [&str; 3] = ["install/system.rs", "pane_terminal.rs", "push_plugin.rs"];
 
 fn rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(directory).unwrap() {
@@ -55,6 +56,26 @@ fn pane_terminal_only_runs_herdr_terminal_session() {
     assert_eq!(source.matches("Command::new(").count(), 1, "只能有一個子行程");
     assert!(source.contains("Command::new(herdr.program())"));
     assert!(source.contains(r#"["terminal", "session", if observe { "observe" } else { "control" }"#));
+}
+
+#[test]
+fn push_plugin_only_runs_fixed_herdr_plugin_commands() {
+    let source = std::fs::read_to_string(source_directory().join("push_plugin.rs")).unwrap();
+
+    assert_eq!(source.matches("Command::new(").count(), 1, "只能有一個子行程");
+    assert!(source.contains("Command::new(self.herdr.program())"));
+    for subcommand in [
+        r#"["plugin", "list", "--plugin", PLUGIN_ID, "--json"]"#,
+        r#"["plugin", "install", PLUGIN_SOURCE, "--yes"]"#,
+        r#"["plugin", "uninstall", PLUGIN_ID]"#,
+    ] {
+        assert!(source.contains(subcommand), "少了 {subcommand}");
+    }
+    assert_eq!(
+        source.matches(r#"["plugin", "#).count(),
+        3,
+        "herdr plugin 子指令只能是 list、install、uninstall"
+    );
 }
 
 #[test]

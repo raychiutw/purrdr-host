@@ -125,4 +125,7 @@ fn only_write_messages_are_marked_as_write() {
     assert!(decode("client.agent-prompt.json").is_write());
     assert!(!decode("client.hello.json").is_write());
     assert!(!decode("client.agents-list.json").is_write());
+    assert!(decode("client.push-install.json").is_write());
+    assert!(decode("client.push-remove.json").is_write());
+    assert!(!decode("client.push-status.json").is_write());
 }
