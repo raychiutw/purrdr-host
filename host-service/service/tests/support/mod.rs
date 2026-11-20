@@ -479,13 +479,21 @@ pub async fn http_request(service: &TestHostService, method: &str, path: &str, d
     (status, body)
 }
 
-/// 同 `start_service`,另外啟動常駐的 Agent 觀察者;`state_directory` 給定時用它(重啟測試)。
-pub async fn start_service_with_observer(herdr_socket: HerdrSocket, state_directory: Option<PathBuf>, observer: ObserverOptions) -> TestHostService {
+/// 同 `start_service`,另外啟動常駐的 Agent 觀察者;`state_directory` 給定時用它(重啟測試),`home` 是推播配對所在的家目錄。
+pub async fn start_service_with_observer(
+    herdr_socket: HerdrSocket,
+    state_directory: Option<PathBuf>,
+    home: Option<PathBuf>,
+    observer: ObserverOptions,
+) -> TestHostService {
     start_service_with_options(
         herdr_socket,
         HerdrCli::search(None),
         Heartbeat::default(),
-        TranscriptEnvironment::default(),
+        TranscriptEnvironment {
+            home,
+            ..TranscriptEnvironment::default()
+        },
         None,
         state_directory,
         None,

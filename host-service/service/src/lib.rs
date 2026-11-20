@@ -6,6 +6,8 @@ use std::time::Duration;
 
 pub mod agent_activity;
 pub mod agent_observer;
+mod agent_push;
+pub mod attention;
 pub mod audit_log;
 pub mod auto_update;
 mod connection;
@@ -175,7 +177,7 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
     let herdr = HerdrClient::new(config.herdr_socket);
     let observer = config.observer.map(|options| {
         let observer = agent_observer::AgentObserver::load(&config.state_directory);
-        let task = agent_observer::spawn(herdr.clone(), observer.clone(), options);
+        let task = agent_observer::spawn(herdr.clone(), observer.clone(), options, config.transcripts.home.clone());
         (observer, task)
     });
     let router = http::router(http::ServiceContext {

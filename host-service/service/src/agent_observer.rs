@@ -2,22 +2,27 @@
 //!
 //! 第一個用途是 Send When Done:每個 pane 一條佇列，Agent 從 working 變成 idle／done 時送出第一則
 //! (經 `pane_guard` 比對 expected_session);`blocked` 之後的 idle 不算做完，session 不符時暫停並標記。
-//! 佇列存在狀態資料夾，重啟後還原。觀察者不記活動紀錄與對話內容(佇列本身就是使用者要送的文字)。
+//! 佇列存在狀態資料夾，重啟後還原。另外定時讀 working Agent 的畫面指紋判斷可能卡住、看 blocked 多久提醒仍在等你
+//! (raychiutw/purrdr.host#31),經推播配對送後台。觀察者不記活動紀錄與對話內容(佇列本身就是使用者要送的文字)。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
-use crate::herdr_client::HerdrClient;
+use crate::agent_push;
+use crate::attention::{Alert, AttentionDetector, REMINDER_AFTER, STUCK_AFTER};
+use crate::herdr_client::{HerdrClient, HerdrSubscription};
 use crate::pane_guard::{self, GuardFailure};
+use crate::pane_screen;
 use crate::protocol::{PaneQueue, QueueChanged, QueuePause, QueuedPrompt, ServerMessage};
 use crate::text_format::hex;
+use crate::update_push::HttpPushTransport;
 
 /// 每個 pane 最多排幾則。
 pub const MAXIMUM_QUEUED_PROMPTS: usize = 20;
@@ -33,6 +38,12 @@ pub struct ObserverOptions {
     pub reconnect_initial: Duration,
     /// 重連等待的上限。
     pub reconnect_maximum: Duration,
+    /// 多久讀一次 working Agent 的畫面指紋、檢查 blocked 多久(raychiutw/purrdr.host#31)。
+    pub screen_check_interval: Duration,
+    /// 畫面不變多久算可能卡住。
+    pub stuck_after: Duration,
+    /// 停在「需要你」多久再提醒。
+    pub reminder_after: Duration,
 }
 
 impl Default for ObserverOptions {
@@ -40,6 +51,9 @@ impl Default for ObserverOptions {
         ObserverOptions {
             reconnect_initial: Duration::from_secs(1),
             reconnect_maximum: Duration::from_secs(60),
+            screen_check_interval: Duration::from_secs(30),
+            stuck_after: STUCK_AFTER,
+            reminder_after: REMINDER_AFTER,
         }
     }
 }
@@ -223,31 +237,108 @@ fn new_item_id() -> Result<String, getrandom::Error> {
     Ok(hex(&bytes))
 }
 
-/// 啟動常駐 task:訂閱 herdr 事件(斷線退避重連)並依狀態轉換送出佇列。
-pub(crate) fn spawn(herdr: HerdrClient, observer: AgentObserver, options: ObserverOptions) -> JoinHandle<()> {
+/// 啟動常駐 task:訂閱 herdr 事件(斷線退避重連),依狀態轉換送出佇列，並定時檢查卡住與仍在等你。
+/// `home` 是推播配對(`~/.purrdr/push-*`)所在的家目錄;None 時不推播。
+pub(crate) fn spawn(herdr: HerdrClient, observer: AgentObserver, options: ObserverOptions, home: Option<PathBuf>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut statuses: HashMap<String, String> = HashMap::new();
+        let mut attention = AttentionDetector::new(options.stuck_after, options.reminder_after);
         let mut delay = options.reconnect_initial;
         loop {
-            if let Ok(mut subscription) = herdr.subscribe(json!({"subscriptions": [{"type": "pane.agent_status_changed"}]})).await {
+            if let Ok(subscription) = herdr.subscribe(json!({"subscriptions": [{"type": "pane.agent_status_changed"}]})).await {
                 delay = options.reconnect_initial;
                 // 訂閱之後才讀 snapshot:中間的轉換會在訂閱裡，不會漏掉。
                 if let Ok(snapshot) = herdr.request("session.snapshot", json!({})).await {
                     statuses = snapshot_statuses(&snapshot);
-                }
-                while let Ok(Some(event)) = subscription.next_event().await {
-                    if let Some((pane_id, status)) = status_change(&event) {
-                        let previous = statuses.insert(pane_id.clone(), status.clone());
-                        if previous.as_deref() == Some("working") && matches!(status.as_str(), "idle" | "done") {
-                            send_next(&herdr, &observer, &pane_id).await;
-                        }
+                    for (pane_id, status) in &statuses {
+                        attention.status(pane_id, status, Instant::now());
                     }
                 }
+                let (mut events, reader) = read_events(subscription);
+                let mut checks = tokio::time::interval(options.screen_check_interval);
+                loop {
+                    tokio::select! {
+                        event = events.recv() => {
+                            let Some(event) = event else { break };
+                            if let Some((pane_id, status)) = status_change(&event) {
+                                attention.status(&pane_id, &status, Instant::now());
+                                let previous = statuses.insert(pane_id.clone(), status.clone());
+                                if previous.as_deref() == Some("working") && matches!(status.as_str(), "idle" | "done") {
+                                    send_next(&herdr, &observer, &pane_id).await;
+                                }
+                            }
+                        }
+                        _ = checks.tick() => check_attention(&herdr, &mut attention, home.as_deref()).await,
+                    }
+                }
+                reader.abort();
             }
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(options.reconnect_maximum);
         }
     })
+}
+
+/// 在另一個 task 讀訂閱(讀一行不能被中途取消),事件經 channel 交出;訂閱結束時 channel 關閉。
+fn read_events(mut subscription: HerdrSubscription) -> (mpsc::UnboundedReceiver<Value>, JoinHandle<()>) {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let reader = tokio::spawn(async move {
+        while let Ok(Some(event)) = subscription.next_event().await {
+            if sender.send(event).is_err() {
+                return;
+            }
+        }
+    });
+    (receiver, reader)
+}
+
+/// working 的 Agent 讀畫面指紋判斷可能卡住;blocked 夠久的提醒仍在等你。
+async fn check_attention(herdr: &HerdrClient, attention: &mut AttentionDetector, home: Option<&Path>) {
+    let mut alerts = Vec::new();
+    for pane_id in attention.working_panes() {
+        if let Ok(fingerprint) = pane_screen::current_fingerprint(herdr, &pane_id).await
+            && attention.screen(&pane_id, &fingerprint, Instant::now()) == Some(Alert::Stuck)
+        {
+            alerts.push((pane_id, "stuck"));
+        }
+    }
+    alerts.extend(attention.reminders(Instant::now()).into_iter().map(|pane_id| (pane_id, "reminder")));
+    let Some(home) = home else {
+        return;
+    };
+    for (pane_id, status) in alerts {
+        push(herdr, home, &pane_id, status).await;
+    }
+}
+
+/// 推播一則 Agent 狀態:workspace 名稱與 session(靜音比對)取自當下的 snapshot。
+async fn push(herdr: &HerdrClient, home: &Path, pane_id: &str, status: &'static str) {
+    let Ok(snapshot) = herdr.request("session.snapshot", json!({})).await else {
+        return;
+    };
+    let session = pane_guard::session_of(&snapshot, pane_id);
+    let Some(workspace) = workspace_label(&snapshot, pane_id) else {
+        return;
+    };
+    let (home, pane_id) = (home.to_owned(), pane_id.to_owned());
+    let _ = tokio::task::spawn_blocking(move || {
+        agent_push::send(&home, &mut HttpPushTransport::default(), status, &workspace, &pane_id, session.as_deref());
+    })
+    .await;
+}
+
+/// pane 所在 workspace 的名稱(沒有名稱時用 workspace id,同主機外掛)。
+fn workspace_label(snapshot: &Value, pane_id: &str) -> Option<String> {
+    let snapshot = &snapshot["snapshot"];
+    let workspace_id = snapshot["agents"].as_array()?.iter().find(|agent| agent["pane_id"] == pane_id)?["workspace_id"].as_str()?;
+    let label = snapshot["workspaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|workspace| workspace["workspace_id"] == workspace_id)
+        .and_then(|workspace| workspace["label"].as_str())
+        .filter(|label| !label.is_empty());
+    Some(label.unwrap_or(workspace_id).to_owned())
 }
 
 fn snapshot_statuses(snapshot: &Value) -> HashMap<String, String> {

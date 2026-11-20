@@ -38,7 +38,7 @@ async fn herdr() -> FakeHerdr {
 
 /// 觀察者訂閱好、讀過 snapshot。
 async fn observing(herdr: &FakeHerdr, state_directory: Option<PathBuf>) -> TestHostService {
-    let service = start_service_with_observer(herdr.socket.clone(), state_directory, options()).await;
+    let service = start_service_with_observer(herdr.socket.clone(), state_directory, None, options()).await;
     herdr
         .wait_until(|herdr| herdr.open_subscriptions() == 1 && herdr.methods().iter().any(|method| method == "session.snapshot"))
         .await;
