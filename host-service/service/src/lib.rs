@@ -25,6 +25,7 @@ pub mod state_directory;
 pub mod transcript;
 mod transcript_session;
 pub mod update;
+pub mod update_push;
 
 mod service_main;
 

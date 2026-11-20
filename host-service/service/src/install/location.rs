@@ -8,7 +8,8 @@ use std::time::{Duration, Instant, SystemTime};
 use super::system::{HostSystem, spawn_update_helper};
 use super::{HostEnvironment, InstallError, InstallPlatform, InstallRecord, ServiceLayout, autostart, read_install_record, service_arguments};
 use crate::running_service;
-use crate::update::{InstallLocation, UpdateError, UpdateLauncher, UpdateLock, UpdateRecord, Version};
+use crate::update::{InstallLocation, UpdateError, UpdateEvent, UpdateLauncher, UpdateLock, UpdateRecord, Version};
+use crate::update_push::{HttpPushTransport, PushTransport, UpdateEventPush};
 
 /// 替換時留下的舊執行檔副檔名。
 const PREVIOUS_SUFFIX: &str = ".previous";
@@ -28,6 +29,7 @@ pub struct InstalledService<S: HostSystem> {
     environment: HostEnvironment,
     system: S,
     start_timeout: Duration,
+    push_transport: Box<dyn PushTransport>,
 }
 
 impl<S: HostSystem> InstalledService<S> {
@@ -36,7 +38,13 @@ impl<S: HostSystem> InstalledService<S> {
             environment,
             system,
             start_timeout: Duration::from_secs(30),
+            push_transport: Box::new(HttpPushTransport::default()),
         }
+    }
+
+    /// 換掉送更新事件推播的 HTTP client。
+    pub fn with_push_transport(self, push_transport: Box<dyn PushTransport>) -> Self {
+        InstalledService { push_transport, ..self }
     }
 
     /// 重啟後等新版開始聽埠的時限。
@@ -216,6 +224,10 @@ impl<S: HostSystem> InstallLocation for InstalledService<S> {
             let _ = std::fs::remove_file(Self::previous(&installed));
             let _ = std::fs::remove_file(Self::with_suffix(&installed, FAILED_SUFFIX));
         }
+    }
+
+    fn notify(&mut self, event: &UpdateEvent) {
+        UpdateEventPush::new(&self.environment.home, self.push_transport.as_mut()).send(event);
     }
 
     fn auto_update(&mut self) -> Result<bool, UpdateError> {
