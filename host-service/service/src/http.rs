@@ -41,6 +41,8 @@ pub(crate) struct ServiceContext {
     pub transcripts: TranscriptEnvironment,
     /// 主機取檔的家目錄、暫存目錄與主機服務資料夾。
     pub files: crate::host_files::FileAccessEnvironment,
+    /// 推播外掛代裝(`~/.purrdr/push-*`)。
+    pub push: crate::push_plugin::PushPlugin,
 }
 
 impl ServiceContext {

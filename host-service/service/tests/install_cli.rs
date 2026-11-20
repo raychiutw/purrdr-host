@@ -18,7 +18,8 @@ fn install_subcommands_are_parsed() {
             herdr_session: None,
             https_port: None,
             assume_yes: false,
-            no_auto_update: false
+            no_auto_update: false,
+            no_path: false,
         }))
     );
     assert_eq!(
@@ -28,7 +29,8 @@ fn install_subcommands_are_parsed() {
             herdr_session: Some("work".into()),
             https_port: None,
             assume_yes: true,
-            no_auto_update: false
+            no_auto_update: false,
+            no_path: false,
         }))
     );
     assert_eq!(
@@ -38,7 +40,8 @@ fn install_subcommands_are_parsed() {
             herdr_session: None,
             https_port: Some(8443),
             assume_yes: false,
-            no_auto_update: false
+            no_auto_update: false,
+            no_path: false,
         }))
     );
     assert_eq!(InstallCommand::parse(&arguments("uninstall")), Some(Ok(InstallCommand::Uninstall)));
@@ -71,7 +74,19 @@ fn install_subcommands_are_parsed() {
             herdr_session: None,
             https_port: None,
             assume_yes: false,
-            no_auto_update: true
+            no_auto_update: true,
+            no_path: false,
+        }))
+    );
+    assert_eq!(
+        InstallCommand::parse(&arguments("install --no-path")),
+        Some(Ok(InstallCommand::Install {
+            port: 47_820,
+            herdr_session: None,
+            https_port: None,
+            assume_yes: false,
+            no_auto_update: false,
+            no_path: true,
         }))
     );
     assert_eq!(

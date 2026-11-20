@@ -92,6 +92,7 @@ impl TestHost {
             xdg_config_home: None,
             user_name: Some("demo".into()),
             current_executable: self.downloads.0.join(executable_names(self.platform)[0]),
+            shell: None,
         }
     }
 
@@ -101,6 +102,7 @@ impl TestHost {
             herdr_session: None,
             https_port: None,
             auto_update: None,
+            add_to_path: None,
             source_directory: self.downloads.0.clone(),
         }
     }
@@ -140,6 +142,8 @@ pub struct SystemState {
     pub run_values: BTreeMap<String, String>,
     /// 背景執行中的程式(路徑與參數)。
     pub background_processes: Vec<Vec<String>>,
+    /// Windows 使用者層級 PATH(`HKCU\Environment` 的 `Path`);None 表示沒有這個值。
+    pub user_path: Option<String>,
 }
 
 /// 另一個工具已經用 `tailscale serve` 占用的 HTTPS 埠(例如 Allymote 的 443)。
@@ -512,6 +516,16 @@ impl HostSystem for FakeSystem {
         process.extend(arguments.iter().cloned());
         self.state.background_processes.push(process);
         self.start_service(Path::new(program));
+        Ok(())
+    }
+
+    fn user_path(&mut self) -> std::io::Result<Option<String>> {
+        Ok(self.state.user_path.clone())
+    }
+
+    fn set_user_path(&mut self, value: Option<&str>) -> std::io::Result<()> {
+        self.commands.push(format!("set user PATH {value:?}"));
+        self.state.user_path = value.map(str::to_owned);
         Ok(())
     }
 
