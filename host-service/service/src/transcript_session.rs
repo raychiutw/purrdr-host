@@ -7,9 +7,10 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
+use crate::connection::error;
 use crate::http::blocking;
 use crate::protocol::{
-    ErrorCode, ErrorMessage, ServerMessage, TranscriptDelegation, TranscriptDelegationResult, TranscriptFollow, TranscriptFollowResult, TranscriptLocateResult,
+    ErrorCode, ServerMessage, TranscriptDelegation, TranscriptDelegationResult, TranscriptFollow, TranscriptFollowResult, TranscriptLocateResult,
     TranscriptPreview, TranscriptPreviews, TranscriptPreviewsResult, TranscriptRecord, TranscriptStreamEnd, TranscriptSubagent, TranscriptSubagentResult,
     TranscriptUnfollow, TranscriptUnfollowResult, TranscriptUpdate, TranscriptWindow, TranscriptWindowResult, TranscriptWorkflow, TranscriptWorkflowResult,
 };
@@ -181,7 +182,7 @@ impl TranscriptSession {
                         key: entry.key,
                         change: preview.change,
                         version: preview.version,
-                        lines: preview.lines,
+                        records: protocol_records(preview.records),
                     })
                 })
                 .collect()
@@ -361,17 +362,7 @@ fn protocol_records(records: Vec<Record>) -> Vec<TranscriptRecord> {
 }
 
 fn invalid(request_id: String, message: &str) -> ServerMessage {
-    error_message(request_id, ErrorCode::InvalidMessage, message)
-}
-
-fn error_message(request_id: String, code: ErrorCode, message: &str) -> ServerMessage {
-    ServerMessage::ErrorMessage(ErrorMessage {
-        request_id: Some(request_id),
-        code,
-        message: message.to_owned(),
-        herdr_code: None,
-        supported_protocol_versions: None,
-    })
+    error(Some(request_id), ErrorCode::InvalidMessage, message)
 }
 
 fn failure_message(request_id: String, failure: TranscriptFailure) -> ServerMessage {
@@ -383,5 +374,5 @@ fn failure_message(request_id: String, failure: TranscriptFailure) -> ServerMess
         TranscriptFailure::NotAllowed => (ErrorCode::TranscriptNotAllowed, "session reference is not allowed"),
         TranscriptFailure::Unsupported => (ErrorCode::TranscriptUnsupported, "host service cannot read this agent's transcript"),
     };
-    error_message(request_id, code, message)
+    error(Some(request_id), code, message)
 }

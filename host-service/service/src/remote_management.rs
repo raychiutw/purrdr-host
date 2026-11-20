@@ -1,15 +1,21 @@
 //! 從 app 管理主機服務(raychiutw/purrdr.host#18):狀態查詢、立即更新與開關自動更新，都走既有的 `Updater`。
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
+use crate::connection::error;
 use crate::http::blocking;
 use crate::install::system::{HostSystem, ProcessHostSystem};
-use crate::install::{HostEnvironment, InstallError, InstalledService, Installer};
+use crate::install::{HostEnvironment, InstallError, InstalledService, Installer, ServiceLayout};
 use crate::protocol::{
-    ErrorCode, ErrorMessage, HostServiceSetAutoUpdateResult, HostServiceStatusResult, HostServiceUpdateOutcome, HostServiceUpdateRecord,
-    HostServiceUpdateResult, ServerMessage,
+    ErrorCode, HostServiceSetAutoUpdateResult, HostServiceStatusResult, HostServiceUpdateOutcome, HostServiceUpdateRecord, HostServiceUpdateResult,
+    ServerMessage,
 };
-use crate::update::{HttpReleaseSource, UpdateCheck, UpdateError, UpdateLaunch, UpdateLauncher, Updater, Version};
+use crate::text_format::rfc3339;
+use crate::update::{CachedReleaseSource, Clock, HttpReleaseSource, UpdateCheck, UpdateError, UpdateLaunch, UpdateLauncher, Updater, Version, system_clock};
+
+/// 狀態查詢快取「最新版本」的檔案(狀態資料夾裡)。
+const LATEST_VERSION_CACHE_FILE: &str = "latest-release.json";
 
 /// 主機服務的更新狀態。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +58,7 @@ pub struct InstalledServiceManagement<S: HostSystem> {
     system: Factory<S>,
     release_source: Factory<HttpReleaseSource>,
     launcher: LauncherFactory<S>,
+    clock: Clock,
 }
 
 impl<S: HostSystem> InstalledServiceManagement<S> {
@@ -66,17 +73,28 @@ impl<S: HostSystem> InstalledServiceManagement<S> {
             system: Box::new(system),
             release_source: Box::new(release_source),
             launcher: Box::new(launcher),
+            clock: system_clock(),
         }
     }
 
-    fn updater(&self) -> Updater<HttpReleaseSource, InstalledService<S>> {
-        Updater::new((self.release_source)(), InstalledService::new(self.environment.clone(), (self.system)()))
+    /// 換掉時鐘(測試推進時間)。
+    pub fn with_clock(self, clock: impl Fn() -> SystemTime + Send + Sync + 'static) -> Self {
+        InstalledServiceManagement {
+            clock: Arc::new(clock),
+            ..self
+        }
+    }
+
+    fn location(&self) -> InstalledService<S> {
+        InstalledService::new(self.environment.clone(), (self.system)()).with_clock(self.clock.clone())
     }
 }
 
 impl<S: HostSystem> HostServiceManagement for InstalledServiceManagement<S> {
     fn status(&self) -> Result<HostServiceState, UpdateError> {
-        let mut updater = self.updater();
+        let cache_file = ServiceLayout::of(&self.environment).directory().join(LATEST_VERSION_CACHE_FILE);
+        let release_source = CachedReleaseSource::new((self.release_source)(), cache_file, self.clock.clone());
+        let mut updater = Updater::new(release_source, self.location());
         let check = updater.check()?;
         Ok(HostServiceState {
             check,
@@ -85,8 +103,8 @@ impl<S: HostSystem> HostServiceManagement for InstalledServiceManagement<S> {
     }
 
     fn update_now(&self) -> Result<UpdateLaunch, UpdateError> {
-        let mut launcher = DeferredLauncher(|| (self.launcher)(&InstalledService::new(self.environment.clone(), (self.system)())));
-        self.updater().launch(&mut launcher)
+        let mut launcher = DeferredLauncher(|| (self.launcher)(&self.location()));
+        Updater::new((self.release_source)(), self.location()).launch(&mut launcher)
     }
 
     fn set_auto_update(&self, enabled: bool) -> Result<(), UpdateError> {
@@ -121,43 +139,41 @@ impl<F: FnMut() -> Box<dyn UpdateLauncher>> UpdateLauncher for DeferredLauncher<
     }
 }
 
-/// 連線收到的管理請求。
-pub(crate) enum ManagementRequest {
-    Status(String),
-    Update(String),
-    SetAutoUpdate { request_id: String, enabled: bool },
+/// 在 blocking 執行緒執行(檢查會連網路、執行已安裝的執行檔);不是安裝好的那份時回 `NotInstalled`。
+async fn run<T: Send + 'static>(
+    management: Option<ServiceManagement>,
+    operation: impl FnOnce(&dyn HostServiceManagement) -> Result<T, UpdateError> + Send + 'static,
+) -> Result<T, UpdateError> {
+    let Some(ServiceManagement(management)) = management else {
+        return Err(UpdateError::NotInstalled);
+    };
+    blocking(move || operation(management.as_ref())).await
 }
 
-impl ManagementRequest {
-    pub fn request_id(&self) -> &str {
-        match self {
-            ManagementRequest::Status(request_id) | ManagementRequest::Update(request_id) | ManagementRequest::SetAutoUpdate { request_id, .. } => request_id,
-        }
+/// `host_service.status`。
+pub(crate) async fn status(management: Option<ServiceManagement>, request_id: String) -> ServerMessage {
+    match run(management, |management| management.status()).await {
+        Ok(state) => status_result(request_id, state),
+        Err(update_error) => failure(request_id, update_error),
     }
 }
 
-/// 在 blocking 執行緒處理請求(檢查會連網路、執行已安裝的執行檔)並轉成回應。
-pub(crate) async fn reply(management: Option<ServiceManagement>, request: ManagementRequest) -> ServerMessage {
-    let request_id = request.request_id().to_owned();
-    let Some(ServiceManagement(management)) = management else {
-        return failure(request_id, UpdateError::NotInstalled);
-    };
-    match request {
-        ManagementRequest::Status(_) => match blocking(move || management.status()).await {
-            Ok(state) => status_result(request_id, state),
-            Err(error) => failure(request_id, error),
-        },
-        ManagementRequest::Update(_) => match blocking(move || management.update_now()).await {
-            Ok(launch) => update_result(request_id, launch),
-            Err(error) => failure(request_id, error),
-        },
-        ManagementRequest::SetAutoUpdate { enabled, .. } => match blocking(move || management.set_auto_update(enabled)).await {
-            Ok(()) => ServerMessage::HostServiceSetAutoUpdateResult(HostServiceSetAutoUpdateResult {
-                request_id,
-                auto_update: enabled,
-            }),
-            Err(error) => failure(request_id, error),
-        },
+/// `host_service.update`。
+pub(crate) async fn update(management: Option<ServiceManagement>, request_id: String) -> ServerMessage {
+    match run(management, |management| management.update_now()).await {
+        Ok(launch) => update_result(request_id, launch),
+        Err(update_error) => failure(request_id, update_error),
+    }
+}
+
+/// `host_service.set_auto_update`。
+pub(crate) async fn set_auto_update(management: Option<ServiceManagement>, request_id: String, enabled: bool) -> ServerMessage {
+    match run(management, move |management| management.set_auto_update(enabled)).await {
+        Ok(()) => ServerMessage::HostServiceSetAutoUpdateResult(HostServiceSetAutoUpdateResult {
+            request_id,
+            auto_update: enabled,
+        }),
+        Err(update_error) => failure(request_id, update_error),
     }
 }
 
@@ -192,15 +208,15 @@ fn status_result(request_id: String, state: HostServiceState) -> ServerMessage {
         update_available,
         auto_update,
         last_update: check.last_result.map(|record| HostServiceUpdateRecord {
-            checked_at: humantime::format_rfc3339_seconds(record.checked_at).to_string(),
+            checked_at: rfc3339(record.checked_at),
             result: record.result,
         }),
         rolled_back: state.rolled_back.map(|version| version.to_string()),
     })
 }
 
-fn failure(request_id: String, error: UpdateError) -> ServerMessage {
-    let (code, message) = match error {
+fn failure(request_id: String, update_error: UpdateError) -> ServerMessage {
+    let (code, message) = match update_error {
         UpdateError::NotInstalled => (
             ErrorCode::HostServiceNotInstalled,
             "this host service is not the installed copy, so it cannot be managed from the app".to_owned(),
@@ -211,11 +227,5 @@ fn failure(request_id: String, error: UpdateError) -> ServerMessage {
         ),
         other => (ErrorCode::UpdateFailed, other.summary()),
     };
-    ServerMessage::ErrorMessage(ErrorMessage {
-        request_id: Some(request_id),
-        code,
-        message,
-        herdr_code: None,
-        supported_protocol_versions: None,
-    })
+    error(Some(request_id), code, &message)
 }

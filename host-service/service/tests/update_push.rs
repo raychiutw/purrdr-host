@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use install_support::push_backend::FakePushBackend;
 use install_support::release::FakeReleaseServer;
-use install_support::{FakeSystem, TestHost, executable_names, fake_host_service, snapshot};
+use install_support::{FakeSystem, TestHost, executable_names, fake_host_service, reserved_port, snapshot};
 use purrdr_host_service::install::{InstallPlatform, InstalledService, Installer};
 use purrdr_host_service::update::{AgentActivity, AutomaticOutcome, HttpReleaseSource, UpdateError, UpdateLauncher, UpdateOutcome, Updater};
 use serde_json::json;
@@ -16,10 +16,6 @@ use serde_json::json;
 const INSTALLED: &str = "0.5.0";
 const PHONE_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const TABLET_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
-}
 
 /// 已安裝 0.5.0、背景服務執行中的測試主機。
 struct InstalledHost {
@@ -33,7 +29,7 @@ impl InstalledHost {
         for name in executable_names(platform) {
             std::fs::write(host.downloads.0.join(name), fake_host_service(INSTALLED, name)).unwrap();
         }
-        let port = free_port();
+        let port = reserved_port();
         let mut system = FakeSystem::ready(&host.home.0);
         system.service_port = Some(port);
         let mut installer = Installer::new(host.environment(), system);
@@ -139,7 +135,7 @@ fn rolled_back_update_sends_rolled_back_event_with_the_failed_version() {
 }
 
 #[test]
-fn automatic_check_that_finds_a_newer_release_sends_update_available_event() {
+fn automatic_update_that_starts_right_away_sends_no_update_available_event() {
     let mut installed = InstalledHost::new(InstallPlatform::MacOs);
     let backend = FakePushBackend::start();
     installed.pair_device("phone", &backend.endpoint(), PHONE_KEY);
@@ -151,10 +147,7 @@ fn automatic_check_that_finds_a_newer_release_sends_update_available_event() {
 
     assert!(matches!(outcome, AutomaticOutcome::Started { .. }), "{outcome:?}");
     assert_eq!(launcher.launches, 1);
-    assert_eq!(
-        backend.bodies(),
-        vec![json!({"key": PHONE_KEY, "event": "host_service_update_available", "version": "0.5.1"})]
-    );
+    assert_eq!(backend.bodies(), Vec::<serde_json::Value>::new(), "馬上換版時只送之後的「已更新」");
 }
 
 #[test]
@@ -186,12 +179,12 @@ fn the_same_event_and_version_is_sent_only_once_but_a_newer_version_is_sent_agai
     let mut updater = installed.updater(&server);
     let mut launcher = FakeLauncher::default();
 
-    updater.automatic(&mut launcher, &mut FakeAgents { working: false });
-    updater.automatic(&mut launcher, &mut FakeAgents { working: false });
+    updater.automatic(&mut launcher, &mut FakeAgents { working: true });
+    updater.automatic(&mut launcher, &mut FakeAgents { working: true });
     publish(&server, InstallPlatform::Linux, "0.5.2", "");
-    updater.automatic(&mut launcher, &mut FakeAgents { working: false });
+    updater.automatic(&mut launcher, &mut FakeAgents { working: true });
 
-    assert_eq!(launcher.launches, 3);
+    assert_eq!(launcher.launches, 0);
     assert_eq!(
         backend.bodies(),
         vec![
@@ -223,7 +216,7 @@ fn revoked_pairing_answered_with_410_removes_only_that_device_folder() {
 fn unreachable_backend_does_not_change_the_update_result_and_is_retried_on_the_next_trigger() {
     let mut installed = InstalledHost::new(InstallPlatform::Linux);
     let backend = FakePushBackend::start();
-    // 特權埠 1 不會有人聽;不用 free_port(),以免同時跑的測試拿到同一個埠。
+    // 特權埠 1 不會有人聽;不用 reserved_port(),以免同時跑的測試拿到同一個埠。
     installed.pair_device("phone", "http://127.0.0.1:1/v1/push", PHONE_KEY);
     installed.pair_device("tablet", &backend.endpoint(), TABLET_KEY);
     let server = FakeReleaseServer::start();
@@ -231,11 +224,11 @@ fn unreachable_backend_does_not_change_the_update_result_and_is_retried_on_the_n
     let mut updater = installed.updater(&server);
     let mut launcher = FakeLauncher::default();
 
-    let while_unreachable = updater.automatic(&mut launcher, &mut FakeAgents { working: false });
+    let while_unreachable = updater.automatic(&mut launcher, &mut FakeAgents { working: true });
     installed.pair_device("phone", &backend.endpoint(), PHONE_KEY);
-    updater.automatic(&mut launcher, &mut FakeAgents { working: false });
+    updater.automatic(&mut launcher, &mut FakeAgents { working: true });
 
-    assert!(matches!(while_unreachable, AutomaticOutcome::Started { .. }), "{while_unreachable:?}");
+    assert!(matches!(while_unreachable, AutomaticOutcome::Deferred { .. }), "{while_unreachable:?}");
     assert_eq!(
         backend.bodies(),
         vec![

@@ -482,7 +482,7 @@ pub(crate) struct ServiceLayout {
 }
 
 impl ServiceLayout {
-    fn of(environment: &HostEnvironment) -> Self {
+    pub(crate) fn of(environment: &HostEnvironment) -> Self {
         ServiceLayout {
             platform: environment.platform,
             home: environment.home.clone(),
@@ -490,7 +490,7 @@ impl ServiceLayout {
         }
     }
 
-    fn directory(&self) -> PathBuf {
+    pub(crate) fn directory(&self) -> PathBuf {
         crate::state_directory::default_state_directory(&self.home)
     }
 

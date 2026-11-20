@@ -84,7 +84,7 @@ fn previews(request_id: &str, entries: Value) -> Value {
 }
 
 #[tokio::test]
-async fn previews_return_the_tail_of_each_located_transcript_with_images_stripped() {
+async fn previews_return_the_tail_of_each_located_transcript_with_raw_lengths_and_images_stripped() {
     let fixture = Fixture::start().await;
     let image = "A".repeat(200);
     let content = format!("{{\"n\":1}}\n{{\"image\":\"{image}\"}}\n{{\"n\":3}}\n");
@@ -98,7 +98,14 @@ async fn previews_return_the_tail_of_each_located_transcript_with_images_strippe
     let preview = &reply["previews"][0];
     assert_eq!(preview["key"], "w1:p6");
     assert_eq!(preview["change"], "whole");
-    assert_eq!(preview["lines"], json!(["{\"n\":1}", "{\"image\":\"\"}", "{\"n\":3}"]));
+    assert_eq!(
+        preview["records"],
+        json!([
+            {"length": 7, "text": "{\"n\":1}"},
+            {"length": 212, "text": "{\"image\":\"\"}"},
+            {"length": 7, "text": "{\"n\":3}"}
+        ])
+    );
     assert!(preview["version"].as_str().is_some_and(|version| !version.is_empty()));
 }
 
@@ -132,10 +139,12 @@ async fn previews_read_only_the_last_48000_bytes_and_skip_transcripts_that_disap
     std::fs::remove_file(&transcript).unwrap();
     let after_removal = client.request(previews("r3", json!([{"key": "a", "path": located_then_removed}]))).await;
 
-    let lines = first["previews"][0]["lines"].as_array().unwrap();
-    assert_eq!(lines.len(), 2, "{first}");
-    assert_eq!(lines[0].as_str().unwrap().len(), 48_000 - "{\"n\":2}\n".len() - 1);
-    assert_eq!(lines[1], "{\"n\":2}");
+    let records = first["previews"][0]["records"].as_array().unwrap();
+    assert_eq!(records.len(), 2, "{first}");
+    let cut_line_length = 48_000 - "{\"n\":2}\n".len() - 1;
+    assert_eq!(records[0]["length"], cut_line_length, "第一行從切點算起");
+    assert_eq!(records[0]["text"].as_str().unwrap().len(), cut_line_length);
+    assert_eq!(records[1], json!({"length": 7, "text": "{\"n\":2}"}));
     assert_eq!(after_removal["previews"], json!([]));
 }
 
@@ -164,9 +173,9 @@ async fn previews_with_the_known_version_return_unchanged_then_only_appended_lin
 
     assert_eq!(unchanged["previews"][0]["change"], "unchanged", "{unchanged}");
     assert_eq!(unchanged["previews"][0]["version"], known_version);
-    assert_eq!(unchanged["previews"][0]["lines"], json!([]));
+    assert_eq!(unchanged["previews"][0]["records"], json!([]));
     assert_eq!(appended["previews"][0]["change"], "appended", "{appended}");
-    assert_eq!(appended["previews"][0]["lines"], json!(["{\"n\":2}"]));
+    assert_eq!(appended["previews"][0]["records"], json!([{"length": 7, "text": "{\"n\":2}"}]));
     assert_ne!(appended["previews"][0]["version"], known_version);
 }
 
@@ -188,7 +197,10 @@ async fn previews_read_the_whole_tail_again_when_the_known_version_is_not_an_ear
         .await;
 
     assert_eq!(replaced["previews"][0]["change"], "whole", "{replaced}");
-    assert_eq!(replaced["previews"][0]["lines"], json!(["{\"m\":1}", "{\"m\":2}"]));
+    assert_eq!(
+        replaced["previews"][0]["records"],
+        json!([{"length": 7, "text": "{\"m\":1}"}, {"length": 7, "text": "{\"m\":2}"}])
+    );
     assert_eq!(garbage["previews"][0]["change"], "whole", "{garbage}");
 }
 

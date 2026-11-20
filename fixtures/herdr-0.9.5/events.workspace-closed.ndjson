@@ -1,0 +1,2 @@
+{"id":"purrdr:events.subscribe","result":{"type":"subscription_started"}}
+{"data":{"type":"workspace_closed","workspace":{"active_tab_id":"w5:t1","agent_status":"unknown","focused":true,"label":"purrdr-spike","number":1,"pane_count":1,"tab_count":1,"workspace_id":"w5"},"workspace_id":"w5"},"event":"workspace_closed"}

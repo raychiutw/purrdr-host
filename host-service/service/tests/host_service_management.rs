@@ -6,10 +6,10 @@ mod support;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use install_support::release::FakeReleaseServer;
-use install_support::{FakeSystem, TestHost, executable_names, fake_host_service};
+use install_support::{FakeSystem, TestHost, executable_names, fake_host_service, reserved_port};
 use purrdr_host_service::install::{InstallPlatform, InstalledService, Installer};
 use purrdr_host_service::remote_management::{self, InstalledServiceManagement, ServiceManagement};
 use purrdr_host_service::update::{HttpReleaseSource, InstallLocation, UpdateLauncher, Updater};
@@ -18,10 +18,6 @@ use support::{FakeHerdr, TestClient, TestHostService, recorded, start_service_wi
 
 const INSTALLED: &str = "0.5.0";
 const PLATFORM: InstallPlatform = InstallPlatform::Linux;
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
-}
 
 fn publish(server: &FakeReleaseServer, version: &str, traits: &str) {
     let executables: Vec<(&str, String)> = executable_names(PLATFORM)
@@ -67,12 +63,13 @@ impl UpdateLauncher for HelperProcess {
     }
 }
 
-/// 已安裝 0.5.0、背景服務執行中的主機，加上連著它的主機服務。
+/// 已安裝 0.5.0、背景服務執行中的主機，加上連著它的主機服務(時鐘由測試推進)。
 struct ManagedHost {
     host: Arc<TestHost>,
     server: FakeReleaseServer,
     helper: HelperProcess,
     service: TestHostService,
+    clock: Arc<Mutex<SystemTime>>,
     _herdr: FakeHerdr,
 }
 
@@ -82,7 +79,7 @@ impl ManagedHost {
         for name in executable_names(PLATFORM) {
             std::fs::write(host.downloads.0.join(name), fake_host_service(INSTALLED, name)).unwrap();
         }
-        let port = free_port();
+        let port = reserved_port();
         let mut system = FakeSystem::ready(&host.home.0);
         system.service_port = Some(port);
         let mut installer = Installer::new(host.environment(), system);
@@ -99,14 +96,16 @@ impl ManagedHost {
             port,
             release_url: server.url(),
         };
+        let clock = Arc::new(Mutex::new(SystemTime::now()));
         let management = {
-            let (home, release_url, launcher) = (host.home.0.clone(), server.url(), helper.clone());
+            let (home, release_url, launcher, now) = (host.home.0.clone(), server.url(), helper.clone(), clock.clone());
             InstalledServiceManagement::new(
                 host.environment(),
                 move || FakeSystem::ready(&home),
                 move || HttpReleaseSource::at(&release_url),
                 move |_: &InstalledService<FakeSystem>| Box::new(launcher.clone()) as Box<dyn UpdateLauncher>,
             )
+            .with_clock(move || *now.lock().unwrap())
         };
         let herdr = FakeHerdr::start(vec![("ping", recorded("ping.ndjson"))]).await;
         let service = start_service_with_management(herdr.socket.clone(), Some(ServiceManagement::new(management))).await;
@@ -115,8 +114,13 @@ impl ManagedHost {
             server,
             helper,
             service,
+            clock,
             _herdr: herdr,
         }
+    }
+
+    fn advance_clock(&self, elapsed: Duration) {
+        *self.clock.lock().unwrap() += elapsed;
     }
 
     async fn client(&self, read_only: bool) -> TestClient {
@@ -197,6 +201,37 @@ async fn status_without_release_source_still_reports_the_installed_version() {
     assert!(reply["latest_error"].as_str().is_some_and(|message| !message.is_empty()), "{reply}");
 }
 
+#[tokio::test]
+async fn status_reuses_the_latest_version_for_fifteen_minutes() {
+    let managed = ManagedHost::start().await;
+    publish(&managed.server, "0.5.1", "");
+    let mut client = managed.client(false).await;
+
+    let first = client.request(status("c1")).await;
+    publish(&managed.server, "0.5.2", "");
+    managed.advance_clock(Duration::from_secs(14 * 60));
+    let cached = client.request(status("c2")).await;
+    managed.advance_clock(Duration::from_secs(2 * 60));
+    let refreshed = client.request(status("c3")).await;
+
+    assert_eq!(first["latest_version"], "0.5.1", "{first}");
+    assert_eq!(cached["latest_version"], "0.5.1", "15 分鐘內不重查：{cached}");
+    assert_eq!(refreshed["latest_version"], "0.5.2", "過期後重查：{refreshed}");
+}
+
+#[tokio::test]
+async fn update_queries_the_latest_version_instead_of_the_cached_one() {
+    let managed = ManagedHost::start().await;
+    publish(&managed.server, "0.5.1", "");
+    let mut client = managed.client(false).await;
+    client.request(status("c4")).await;
+    publish(&managed.server, "0.5.2", "");
+
+    let reply = client.request(update("c5")).await;
+
+    assert_eq!(reply["to_version"], "0.5.2", "{reply}");
+}
+
 fn update(request_id: &str) -> Value {
     json!({"type": "host_service.update", "request_id": request_id})
 }
@@ -259,6 +294,45 @@ async fn update_while_another_update_runs_is_in_progress() {
     drop(held);
     let retried = client.request(update("u5")).await;
     assert_eq!(retried["outcome"], "started", "鎖放開後可以更新：{retried}");
+}
+
+#[tokio::test]
+async fn second_update_before_the_helper_takes_the_lock_is_in_progress() {
+    let managed = ManagedHost::start().await;
+    publish(&managed.server, "0.5.1", "");
+    let (allow_helper, helper_allowed) = mpsc::channel();
+    *managed.helper.release.lock().unwrap() = Some(helper_allowed);
+    let mut client = managed.client(false).await;
+
+    let first = client.request(update("d1")).await;
+    let second = client.request(update("d2")).await;
+
+    assert_eq!(first["outcome"], "started", "{first}");
+    assert_eq!(second["code"], "update_in_progress", "{second}");
+    assert_eq!(managed.helper.launches.load(Ordering::SeqCst), 1);
+    allow_helper.send(()).unwrap();
+    let helper = managed.helper.finished.lock().unwrap().take().unwrap();
+    tokio::task::spawn_blocking(move || helper.join().unwrap()).await.unwrap();
+    publish(&managed.server, "0.5.2", "");
+    let after_helper = client.request(update("d3")).await;
+    assert_eq!(after_helper["outcome"], "started", "更新程序接手後不再擋：{after_helper}");
+}
+
+#[tokio::test]
+async fn update_reservation_expires_when_the_helper_never_takes_over() {
+    let managed = ManagedHost::start().await;
+    publish(&managed.server, "0.5.1", "");
+    let mut client = managed.client(false).await;
+
+    let first = client.request(update("e1")).await;
+    let blocked = client.request(update("e2")).await;
+    managed.advance_clock(Duration::from_secs(3 * 60));
+    let after_expiry = client.request(update("e3")).await;
+
+    assert_eq!(first["outcome"], "started", "{first}");
+    assert_eq!(blocked["code"], "update_in_progress", "{blocked}");
+    assert_eq!(after_expiry["outcome"], "started", "更新程序一直沒接手，標記過期後可再試：{after_expiry}");
+    assert_eq!(managed.helper.launches.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

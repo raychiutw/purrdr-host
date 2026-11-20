@@ -16,7 +16,7 @@ use crate::connection;
 use crate::device_store::{Device, DeviceStore, PairingFailure, RevokeFailure, TokenRejection};
 use crate::herdr_cli::HerdrCli;
 use crate::herdr_client::HerdrClient;
-use crate::protocol::{ErrorCode, ErrorMessage, PairRequest, PairResponse, ServerMessage};
+use crate::protocol::{ErrorCode, PairRequest, PairResponse};
 use crate::transcript::TranscriptEnvironment;
 
 /// app 連線的 WebSocket 路徑。
@@ -193,14 +193,7 @@ fn token_error_response(code: ErrorCode) -> Response {
 }
 
 fn error_response(status: StatusCode, code: ErrorCode, message: &str) -> Response {
-    let body = ServerMessage::ErrorMessage(ErrorMessage {
-        request_id: None,
-        code,
-        message: message.to_owned(),
-        herdr_code: None,
-        supported_protocol_versions: None,
-    });
-    (status, Json(body)).into_response()
+    (status, Json(connection::error(None, code, message))).into_response()
 }
 
 /// 裝置名稱會顯示在主機的終端機：去掉控制字元(避免跳脫序列)並限制長度。

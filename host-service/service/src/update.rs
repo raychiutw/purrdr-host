@@ -5,11 +5,13 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
 use crate::install::InstallPlatform;
+use crate::text_format::{hex, rfc3339};
 
 /// Release tag 的前綴(`host-service-v<版本>`)。
 const TAG_PREFIX: &str = "host-service-v";
@@ -22,6 +24,16 @@ pub const RELEASE_URL_VARIABLE: &str = "PURRDR_HOST_SERVICE_RELEASE_URL";
 const MAXIMUM_DOWNLOAD: u64 = 256 * 1024 * 1024;
 /// 背景自動更新因 Agent 工作中最多連續延後幾次，之後照常更新。
 pub const MAXIMUM_DEFERRALS: u32 = 3;
+/// 「最新版本」查詢結果的快取時效(GitHub API 未認證每小時 60 次)。
+pub const LATEST_VERSION_CACHE_DURATION: Duration = Duration::from_secs(15 * 60);
+
+/// 目前時間的來源(測試推進時間)。
+pub type Clock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
+
+/// 系統時鐘。
+pub fn system_clock() -> Clock {
+    Arc::new(SystemTime::now)
+}
 
 /// 語意化版本(只接受 `主.次.修`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -176,6 +188,10 @@ fn io_error(error: impl std::fmt::Display) -> UpdateError {
     UpdateError::Io(error.to_string())
 }
 
+fn launch_failed(message: String) -> UpdateError {
+    UpdateError::Io(format!("cannot start the update: {message}"))
+}
+
 /// 上一次檢查或更新的時間與結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateRecord {
@@ -247,6 +263,8 @@ pub enum AutomaticOutcome {
         from: Version,
         to: Version,
     },
+    /// 已有更新在進行或剛被手動啟動，這次略過(不算延後)。
+    InProgress,
     Failed(UpdateError),
 }
 
@@ -329,6 +347,10 @@ pub trait InstallLocation {
     fn last_result(&mut self) -> Option<UpdateRecord>;
     /// 拿更新鎖(手動與自動互斥);已有更新在進行時回 `InProgress`。
     fn lock(&mut self) -> Result<UpdateLock, UpdateError>;
+    /// 啟動更新程序前占位，蓋住它拿到鎖之前的空檔;有更新在進行或占位還沒過期時回 `InProgress`。
+    fn reserve_launch(&mut self) -> Result<(), UpdateError>;
+    /// 放掉占位(啟動失敗或套用結束時)。
+    fn release_launch(&mut self);
     /// 上次更新後退回的版本(不再自動重試)。
     fn rolled_back_version(&mut self) -> Option<Version>;
     fn set_rolled_back_version(&mut self, version: Option<Version>);
@@ -425,6 +447,44 @@ impl ReleaseSource for HttpReleaseSource {
     }
 }
 
+/// 把最新版本快取在狀態資料夾的 Release 來源(只有狀態查詢用);下載不快取。
+pub struct CachedReleaseSource<R: ReleaseSource> {
+    source: R,
+    cache_file: PathBuf,
+    clock: Clock,
+}
+
+impl<R: ReleaseSource> CachedReleaseSource<R> {
+    pub fn new(source: R, cache_file: PathBuf, clock: Clock) -> Self {
+        CachedReleaseSource { source, cache_file, clock }
+    }
+
+    fn fresh_cached_version(&self, now: SystemTime) -> Option<Version> {
+        let cached: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&self.cache_file).ok()?).ok()?;
+        let checked_at = humantime::parse_rfc3339(cached["checked_at"].as_str()?).ok()?;
+        let fresh = now.duration_since(checked_at).is_ok_and(|age| age < LATEST_VERSION_CACHE_DURATION);
+        fresh.then(|| cached["version"].as_str()?.parse().ok()).flatten()
+    }
+}
+
+impl<R: ReleaseSource> ReleaseSource for CachedReleaseSource<R> {
+    /// 只快取成功的結果;寫不進快取不影響查詢。
+    fn latest_version(&mut self) -> Result<Version, UpdateError> {
+        let now = (self.clock)();
+        if let Some(cached) = self.fresh_cached_version(now) {
+            return Ok(cached);
+        }
+        let latest = self.source.latest_version()?;
+        let cached = serde_json::json!({"version": latest.to_string(), "checked_at": rfc3339(now)});
+        let _ = std::fs::write(&self.cache_file, cached.to_string());
+        Ok(latest)
+    }
+
+    fn download(&mut self, version: &Version, file_name: &str) -> Result<Vec<u8>, UpdateError> {
+        self.source.download(version, file_name)
+    }
+}
+
 /// 這個平台的 Release 壓縮檔名(與 Release workflow 的 target 對應)。
 pub fn release_asset_name(platform: InstallPlatform) -> String {
     let architecture = std::env::consts::ARCH;
@@ -489,16 +549,17 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
         if !check.update_available() {
             return Ok(UpdateLaunch::UpToDate { installed, latest });
         }
-        // 只確認沒有更新在進行;鎖由更新程序自己拿。
-        drop(self.location.lock()?);
-        launcher
-            .launch()
-            .map_err(|message| UpdateError::Io(format!("cannot start the update: {message}")))?;
+        // 鎖由更新程序自己拿;占位擋住它拿到鎖之前的第二次請求。
+        self.location.reserve_launch()?;
+        if let Err(message) = launcher.launch() {
+            self.location.release_launch();
+            return Err(launch_failed(message));
+        }
         self.record(format!("update to {latest} started"));
         Ok(UpdateLaunch::Started { from: installed, to: latest })
     }
 
-    /// 背景自動檢查：開啟且有新版時啟動更新程序(由它套用);結果都記下來。
+    /// 背景自動檢查：開啟且有新版時占位並啟動更新程序(由它套用);結果都記下來。
     pub fn automatic(&mut self, launcher: &mut impl UpdateLauncher, agents: &mut impl AgentActivity) -> AutomaticOutcome {
         match self.location.auto_update() {
             Ok(true) => {}
@@ -517,13 +578,20 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
                 self.location.set_deferred_updates(deferred);
                 AutomaticOutcome::Deferred { to, deferred }
             }
-            Ok((true, (from, to))) => {
-                self.location.set_deferred_updates(0);
-                match launcher.launch() {
-                    Ok(()) => AutomaticOutcome::Started { from, to },
-                    Err(message) => AutomaticOutcome::Failed(UpdateError::Io(format!("cannot start the update: {message}"))),
+            Ok((true, (from, to))) => match self.location.reserve_launch() {
+                Err(UpdateError::InProgress) => AutomaticOutcome::InProgress,
+                Err(reservation_error) => AutomaticOutcome::Failed(reservation_error),
+                Ok(()) => {
+                    self.location.set_deferred_updates(0);
+                    match launcher.launch() {
+                        Ok(()) => AutomaticOutcome::Started { from, to },
+                        Err(message) => {
+                            self.location.release_launch();
+                            AutomaticOutcome::Failed(launch_failed(message))
+                        }
+                    }
                 }
-            }
+            },
         };
         let result = match &outcome {
             AutomaticOutcome::UpToDate(installed) => format!("up to date ({installed})"),
@@ -531,10 +599,12 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
             AutomaticOutcome::Failed(error) => format!("check failed: {}", error.summary()),
             AutomaticOutcome::Skipped(version) => format!("skipped {version}: it was rolled back before (run update to try again)"),
             AutomaticOutcome::Deferred { to, deferred } => format!("deferred update to {to}: an agent is working ({deferred} in a row)"),
+            AutomaticOutcome::InProgress => "skipped: another update is in progress".to_owned(),
             AutomaticOutcome::Disabled => unreachable!("前面已回傳"),
         };
         self.record(result);
-        if let AutomaticOutcome::Started { to, .. } | AutomaticOutcome::Deferred { to, .. } = &outcome {
+        // 馬上換版時只送之後的「已更新」。
+        if let AutomaticOutcome::Deferred { to, .. } = &outcome {
             self.location.notify(&UpdateEvent::Available(*to));
         }
         outcome
@@ -543,6 +613,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
     /// 有更大的版本就下載、核對、替換、重啟;新版起不來就退回。結果記下來。
     pub fn apply(&mut self) -> Result<UpdateOutcome, UpdateError> {
         let applied = self.apply_unrecorded();
+        self.location.release_launch();
         match &applied {
             Ok(UpdateOutcome::Updated { to, .. }) => self.location.notify(&UpdateEvent::Updated(*to)),
             Err(UpdateError::RolledBack { failed, .. }) => self.location.notify(&UpdateEvent::RolledBack(*failed)),
@@ -595,6 +666,7 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
         }
         self.location.discard_previous();
         self.location.set_rolled_back_version(None);
+        self.location.set_deferred_updates(0);
         Ok(UpdateOutcome::Updated { from: installed, to: latest })
     }
 
@@ -632,7 +704,7 @@ fn link_refused(name: &str) -> UpdateError {
 
 /// `SHA256SUMS` 裡 `asset` 那一行要與壓縮檔相符。
 fn verify_checksum(checksums: &[u8], asset: &str, archive: &[u8]) -> Result<(), UpdateError> {
-    let actual: String = Sha256::digest(archive).iter().map(|byte| format!("{byte:02x}")).collect();
+    let actual = hex(&Sha256::digest(archive));
     let expected = String::from_utf8_lossy(checksums).lines().find_map(|line| {
         let (digest, name) = line.split_once(char::is_whitespace)?;
         let name = name.trim_start();

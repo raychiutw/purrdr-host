@@ -8,6 +8,7 @@ use std::time::UNIX_EPOCH;
 use sha2::{Digest, Sha256};
 
 use crate::protocol::{TranscriptPreviewChange, TranscriptWorkflowKind};
+use crate::text_format::hex;
 use crate::transcript::{Record, TranscriptFailure, strip_images};
 
 /// 列表預覽最多讀的檔尾 bytes(同 SSH 預覽腳本的 `tail -c 48000`)。
@@ -22,7 +23,7 @@ pub struct Preview {
     pub change: TranscriptPreviewChange,
     /// `<修改時間>-<大小> <錨點>`,app 原樣帶回。
     pub version: String,
-    pub lines: Vec<String>,
+    pub records: Vec<Record>,
 }
 
 /// 讀預覽：與 `known_version` 相同回 unchanged;只是附加了不超過 48000 bytes 的完整行時只回附加部分;否則回檔尾。
@@ -40,7 +41,7 @@ pub fn preview(path: &Path, known_version: Option<&str>) -> Result<Preview, Tran
         return Ok(Preview {
             change: TranscriptPreviewChange::Unchanged,
             version,
-            lines: Vec::new(),
+            records: Vec::new(),
         });
     }
     let known_size = match known_version {
@@ -55,7 +56,7 @@ pub fn preview(path: &Path, known_version: Option<&str>) -> Result<Preview, Tran
     Ok(Preview {
         change,
         version,
-        lines: stripped_lines(&content),
+        records: stripped_records(&content),
     })
 }
 
@@ -80,15 +81,18 @@ fn anchor(file: &mut File, end: u64) -> Result<String, TranscriptFailure> {
         return Ok("0".to_owned());
     }
     let bytes = read_range(file, end.saturating_sub(ANCHOR_BYTES), end)?;
-    Ok(Sha256::digest(&bytes).iter().take(8).map(|byte| format!("{byte:02x}")).collect())
+    Ok(hex(&Sha256::digest(&bytes)[..8]))
 }
 
-/// 依換行切開、剝除圖片;空行略過(同 app 解析 SSH 輸出)。
-fn stripped_lines(content: &[u8]) -> Vec<String> {
+/// 依換行切開，每行記原始長度並剝除圖片;空行略過(同 app 解析 SSH 輸出)。
+fn stripped_records(content: &[u8]) -> Vec<Record> {
     content
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-        .map(|line| String::from_utf8_lossy(&strip_images(line)).into_owned())
+        .map(|line| Record {
+            length: line.len() as u64,
+            text: String::from_utf8_lossy(&strip_images(line)).into_owned(),
+        })
         .collect()
 }
 
@@ -198,7 +202,7 @@ pub fn delegation_lines(transcript: &Path, ids: &[&str], known_checksum: Option<
             text: String::from_utf8_lossy(&stripped).into_owned(),
         });
     }
-    let checksum: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+    let checksum = hex(&hasher.finalize());
     let records = (known_checksum != Some(checksum.as_str())).then_some(records);
     Ok(DelegationLines { checksum, records })
 }
@@ -208,7 +212,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn checksum(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+    hex(&Sha256::digest(bytes))
 }
 
 fn open(path: &Path) -> Result<File, TranscriptFailure> {

@@ -31,8 +31,9 @@ use crate::protocol::{
     TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
-use crate::remote_management::{ManagementRequest, ServiceManagement};
+use crate::remote_management::{self, ServiceManagement};
 use crate::structure_operations;
+use crate::text_format::rfc3339;
 use crate::transcript::AgentSessionInfo;
 use crate::transcript_session::TranscriptSession;
 use crate::uploads::{ChunkOutcome, PendingUpload, UploadDirectory, UploadFailure};
@@ -165,6 +166,31 @@ async fn handle_requests(mut connection: ClientConnection, mut queue: mpsc::Unbo
     }
 }
 
+/// 要先送 hello 的訊息;不必的是 hello 本身、推播代裝，以及作用在 hello 後才開的串流、上傳與對話紀錄上的訊息。
+fn requires_handshake(message: &ClientMessage) -> bool {
+    !matches!(
+        message,
+        ClientMessage::Hello(_)
+            | ClientMessage::TranscriptWindow(_)
+            | ClientMessage::TranscriptFollow(_)
+            | ClientMessage::TranscriptUnfollow(_)
+            | ClientMessage::TranscriptPreviews(_)
+            | ClientMessage::TranscriptSubagent(_)
+            | ClientMessage::TranscriptWorkflow(_)
+            | ClientMessage::TranscriptDelegation(_)
+            | ClientMessage::EventsUnsubscribe(_)
+            | ClientMessage::PaneTerminalInput(_)
+            | ClientMessage::PaneTerminalResize(_)
+            | ClientMessage::PaneTerminalScroll(_)
+            | ClientMessage::PaneTerminalClose(_)
+            | ClientMessage::FileUploadChunk(_)
+            | ClientMessage::PushStatus(_)
+            | ClientMessage::PushInstall(_)
+            | ClientMessage::PushUpdateMuted(_)
+            | ClientMessage::PushRemove(_)
+    )
+}
+
 /// 權杖被拒時的錯誤訊息與 close frame。
 fn rejection(code: ErrorCode) -> (ServerMessage, CloseFrame) {
     let (close_code, reason, message) = match code {
@@ -262,10 +288,9 @@ impl ClientConnection {
             Err(decoding_error) => return Some(error(request_id, ErrorCode::InvalidMessage, &decoding_error.to_string())),
         };
         if message.is_write() {
-            // 稽核只記操作種類與目標 Pane,不記按鍵或 prompt 內容;串流上的輸入(沒有請求識別碼，例如 Pane 終端機的按鍵)
-            // 不逐則記，Pane 終端機只在開啟時記一筆;上傳的分塊也不逐則記，完成或失敗時另記一筆 upload。
-            let upload_chunk = matches!(message, ClientMessage::FileUploadChunk(_));
-            if request_id.is_some() && !(upload_chunk && !device.read_only) {
+            // 只記操作種類與目標;串流輸入不記，允許的上傳分塊改在完成或失敗時記一筆 upload。
+            let allowed_upload_chunk = matches!(message, ClientMessage::FileUploadChunk(_)) && !device.read_only;
+            if request_id.is_some() && !allowed_upload_chunk {
                 self.audit.record(
                     AuditEvent::Write {
                         device_id: device.device_id.clone(),
@@ -281,15 +306,7 @@ impl ClientConnection {
                 return Some(error(request_id, ErrorCode::ReadOnlyDevice, "this device is paired read-only"));
             }
         }
-        let structure_operation = matches!(
-            message,
-            ClientMessage::WorkspaceCreate(_)
-                | ClientMessage::WorkspaceRename(_)
-                | ClientMessage::WorkspaceClose(_)
-                | ClientMessage::WorktreeCreate(_)
-                | ClientMessage::AgentStart(_)
-        );
-        if structure_operation && !self.handshaken {
+        if requires_handshake(&message) && !self.handshaken {
             return Some(error(request_id, ErrorCode::HandshakeRequired, "send hello first"));
         }
         let reply = match message {
@@ -363,14 +380,10 @@ impl ClientConnection {
             ClientMessage::AgentStart(request) => structure_operations::agent_start(&self.herdr, request).await,
             ClientMessage::FileUploadStart(request) => self.upload_start(request, device).await,
             ClientMessage::FileUploadChunk(request) => self.upload_chunk(request, device).await,
-            ClientMessage::HostServiceStatus(request) => self.manage(ManagementRequest::Status(request.request_id)).await,
-            ClientMessage::HostServiceUpdate(request) => self.manage(ManagementRequest::Update(request.request_id)).await,
+            ClientMessage::HostServiceStatus(request) => remote_management::status(self.service_management.clone(), request.request_id).await,
+            ClientMessage::HostServiceUpdate(request) => remote_management::update(self.service_management.clone(), request.request_id).await,
             ClientMessage::HostServiceSetAutoUpdate(request) => {
-                self.manage(ManagementRequest::SetAutoUpdate {
-                    request_id: request.request_id,
-                    enabled: request.enabled,
-                })
-                .await
+                remote_management::set_auto_update(self.service_management.clone(), request.request_id, request.enabled).await
             }
             ClientMessage::DevicesList(request) => self.devices_list(request.request_id, device).await,
             ClientMessage::DevicesRevoke(request) => self.devices_revoke(request.request_id, request.device_id, device).await,
@@ -381,13 +394,6 @@ impl ClientConnection {
             }
         };
         Some(reply)
-    }
-
-    async fn manage(&self, request: ManagementRequest) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id().to_owned()), ErrorCode::HandshakeRequired, "send hello first");
-        }
-        crate::remote_management::reply(self.service_management.clone(), request).await
     }
 
     /// 已配對(未撤銷)的裝置，不含權杖。
@@ -412,7 +418,6 @@ impl ClientConnection {
                 name: stored.name,
                 read_only: stored.read_only,
                 paired_at: rfc3339(stored.paired_at),
-                last_connected_at: stored.last_connected_at.map(rfc3339),
             })
             .collect();
         ServerMessage::DevicesListResult(DevicesListResult {
@@ -423,6 +428,13 @@ impl ClientConnection {
 
     /// 撤銷指定裝置;它的下一個訊息由每則重新驗證拒絕(4401)。
     async fn devices_revoke(&self, request_id: String, device_id: String, requester: &Device) -> ServerMessage {
+        if device_id == requester.device_id {
+            return error(
+                Some(request_id),
+                ErrorCode::InvalidMessage,
+                "a device cannot revoke itself over the WebSocket; use POST /v1/revoke",
+            );
+        }
         let devices = self.devices.clone();
         let target_device_id = device_id.clone();
         match blocking(move || devices.revoke(&target_device_id, SystemTime::now())).await {
@@ -454,9 +466,6 @@ impl ClientConnection {
     /// 以子行程執行 herdr;唯讀裝置用 observe(只能看)。
     fn open_terminal(&mut self, request: PaneTerminalOpen, device: &Device) -> ServerMessage {
         let request_id = request.request_id.clone();
-        if !self.handshaken {
-            return error(Some(request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         if !pane_terminal::is_valid_target(&request.target) || !pane_terminal::is_valid_size(request.columns, request.rows) {
             return error(Some(request_id), ErrorCode::InvalidMessage, "invalid terminal target or size");
         }
@@ -490,9 +499,6 @@ impl ClientConnection {
     }
 
     async fn pane_send_text(&self, request: PaneSendText) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let params = json!({"pane_id": request.pane_id, "text": request.text});
         match self.herdr.request("pane.send_text", params).await {
             Ok(_) => ServerMessage::PaneSendTextResult(PaneSendTextResult {
@@ -503,9 +509,6 @@ impl ClientConnection {
     }
 
     async fn agent_prompt(&self, request: AgentPrompt) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let mut params = json!({"target": request.pane_id, "text": request.text});
         let mut herdr_wait = Duration::ZERO;
         if let Some(wait) = request.wait {
@@ -523,9 +526,6 @@ impl ClientConnection {
 
     /// 開 herdr 訂閱;herdr 接受後先回結果，再開始轉送事件(順序不會顛倒)。
     async fn events_subscribe(&mut self, request: EventsSubscribe) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         if self.subscriptions.contains_key(&request.stream_id) {
             return error(
                 Some(request.request_id),
@@ -638,9 +638,6 @@ impl ClientConnection {
     }
 
     async fn file_stat(&mut self, request: FileStat, device: &Device) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let located = match self.locate_file(&request.path, Purpose::Status).await {
             Ok(located) => located,
             Err(failure) => return herdr_error(request.request_id, "session.snapshot", failure),
@@ -656,9 +653,6 @@ impl ClientConnection {
 
     /// 從頭讀或還沒有這個版本的快照時重新檢查並建快照;之後的分塊從快照讀。
     async fn file_read(&mut self, request: FileRead, device: &Device) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let (Ok(offset), Ok(length)) = (u64::try_from(request.offset), u64::try_from(request.length)) else {
             return error(Some(request.request_id), ErrorCode::InvalidMessage, "offset and length must not be negative");
         };
@@ -707,9 +701,6 @@ impl ClientConnection {
     }
 
     async fn upload_start(&mut self, request: FileUploadStart, device: &Device) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let Some(uploads) = self.uploads.clone() else {
             return error(
                 Some(request.request_id),
@@ -791,9 +782,6 @@ impl ClientConnection {
 
     /// 對話紀錄只能依 herdr 目前回報的 agent_session 定位(#59)。
     async fn transcript_locate(&mut self, request: TranscriptLocate) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let result = match self.herdr.request("session.snapshot", json!({})).await {
             Ok(result) => result,
             Err(failure) => return herdr_error(request.request_id, "session.snapshot", failure),
@@ -818,9 +806,6 @@ impl ClientConnection {
     }
 
     async fn pane_send_keys(&self, request: PaneSendKeys) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         let params = json!({"pane_id": request.pane_id, "keys": request.keys});
         match self.herdr.request("pane.send_keys", params).await {
             Ok(_) => ServerMessage::PaneSendKeysResult(PaneSendKeysResult {
@@ -873,9 +858,6 @@ impl ClientConnection {
     }
 
     async fn agents_list(&self, request_id: String) -> ServerMessage {
-        if !self.handshaken {
-            return error(Some(request_id), ErrorCode::HandshakeRequired, "send hello first");
-        }
         match self.herdr.request("session.snapshot", json!({})).await {
             Ok(result) => ServerMessage::AgentsListResult(agents_list_result(request_id, result)),
             Err(failure) => herdr_error(request_id, "session.snapshot", failure),
@@ -1027,10 +1009,6 @@ fn upload_error(request_id: String, failure: UploadFailure) -> ServerMessage {
         UploadFailure::Invalid(message) => error(Some(request_id), ErrorCode::InvalidMessage, message),
         UploadFailure::Storage(storage_error) => error(Some(request_id), ErrorCode::InternalError, &format!("cannot write the upload: {storage_error}")),
     }
-}
-
-fn rfc3339(time: SystemTime) -> String {
-    humantime::format_rfc3339_seconds(time).to_string()
 }
 
 pub(crate) fn error(request_id: Option<String>, code: ErrorCode, message: &str) -> ServerMessage {
