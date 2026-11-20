@@ -375,37 +375,100 @@ async fn install_and_remove_are_audited_without_the_key() {
     assert!(!audit.contains(KEY), "{audit}");
 }
 
-async fn resending_install_after_the_plugin_disappeared_keeps_the_pairing() {
+async fn failed_reinstall_restores_the_previous_pairing() {
     let harness = Harness::start().await;
     let mut client = harness.client().await;
     client.request(install("phone-a")).await;
+    let paired = harness.home_snapshot();
     std::fs::remove_file(harness.fake.path().join("installed")).unwrap();
     harness.mark("install-fails");
+    let mut renewed = install("phone-a");
+    renewed["pairing"]["key"] = json!("ff".repeat(32));
 
-    let reply = client.request(install("phone-a")).await;
+    let reply = client.request(renewed).await;
 
-    assert_eq!(reply["type"], "push.install.result", "{reply}");
-    assert!(harness.home_file(".purrdr/push-phone-a/pairing").is_some());
+    assert_eq!(reply["code"], "push_plugin_failed", "{reply}");
+    assert_eq!(harness.home_snapshot(), paired);
 }
 
-async fn paired_device_updates_muted_without_herdr() {
+async fn reinstall_overwrites_the_key_without_reinstalling_the_plugin() {
+    let harness = Harness::start().await;
+    let mut client = harness.client().await;
+    client.request(install("phone-a")).await;
+    let mut renewed = install("phone-a");
+    renewed["pairing"]["key"] = json!("ff".repeat(32));
+
+    let reply = client.request(renewed).await;
+
+    assert_eq!(reply, state("push.install.result", "i1", true, true, 0));
+    let pairing = harness.home_file(".purrdr/push-phone-a/pairing").unwrap();
+    assert!(pairing.contains(&format!("key={}\n", "ff".repeat(32))), "{pairing}");
+    assert_eq!(harness.calls().iter().filter(|call| call.contains("install ")).count(), 1);
+}
+
+fn update_muted(device_id: &str, muted: Value) -> Value {
+    json!({"type": "push.update_muted", "request_id": "m1", "device_id": device_id, "muted": muted})
+}
+
+async fn update_muted_rewrites_only_muted_without_herdr() {
     let harness = Harness::start().await;
     let mut client = harness.client().await;
     client.request(install("phone-a")).await;
     let calls_before = harness.calls();
     harness.mark("list-fails");
-    harness.mark("install-fails");
-    let mut muted = install("phone-a");
-    muted["pairing"]["muted"] = json!(["w2-session", "w1-session"]);
 
-    let reply = client.request(muted).await;
+    let reply = client.request(update_muted("phone-a", json!(["w2-session", "w1-session", "w2-session"]))).await;
+    let cleared = client.request(update_muted("phone-a", json!([]))).await;
 
-    assert_eq!(reply, state("push.install.result", "i1", true, true, 0));
+    assert_eq!(reply, state("push.update_muted.result", "m1", true, true, 0));
+    assert_eq!(cleared, state("push.update_muted.result", "m1", true, true, 0));
+    assert_eq!(
+        harness.home_file(".purrdr/push-phone-a/pairing").as_deref(),
+        Some(format!("purrdr-push 1\nendpoint={ENDPOINT}\nkey={KEY}\n").as_str())
+    );
+    assert_eq!(harness.calls(), calls_before, "不呼叫 herdr");
+}
+
+async fn update_muted_keeps_key_and_endpoint_and_sorts_sessions() {
+    let harness = Harness::start().await;
+    let mut client = harness.client().await;
+    client.request(install("phone-a")).await;
+
+    client.request(update_muted("phone-a", json!(["w2-session", "w1-session"]))).await;
+
     assert_eq!(
         harness.home_file(".purrdr/push-phone-a/pairing").as_deref(),
         Some(format!("purrdr-push 1\nendpoint={ENDPOINT}\nkey={KEY}\nmuted=w1-session\nmuted=w2-session\n").as_str())
     );
-    assert_eq!(harness.calls(), calls_before, "已配對時不呼叫 herdr");
+}
+
+async fn update_muted_on_an_unpaired_device_is_rejected() {
+    let harness = Harness::start().await;
+    let before = harness.home_snapshot();
+    let mut client = harness.client().await;
+
+    let unpaired = client.request(update_muted("phone-a", json!(["w1-session"]))).await;
+    let invalid_device = client.request(update_muted("../x", json!([]))).await;
+
+    assert_eq!(unpaired["code"], "push_not_paired", "{unpaired}");
+    assert_eq!(invalid_device["code"], "invalid_message", "{invalid_device}");
+    assert_eq!(harness.home_snapshot(), before);
+    assert!(harness.calls().is_empty());
+}
+
+async fn update_muted_rejects_multiline_sessions_and_read_only_devices() {
+    let harness = Harness::start().await;
+    let mut client = harness.client().await;
+    client.request(install("phone-a")).await;
+    let paired = harness.home_snapshot();
+    let mut read_only = harness.read_only_client().await;
+
+    let multiline = client.request(update_muted("phone-a", json!(["a\nkey=evil"]))).await;
+    let refused = read_only.request(update_muted("phone-a", json!(["w1-session"]))).await;
+
+    assert_eq!(multiline["code"], "invalid_message", "{multiline}");
+    assert_eq!(refused["code"], "read_only_device", "{refused}");
+    assert_eq!(harness.home_snapshot(), paired);
 }
 
 // MARK: - 執行
@@ -442,11 +505,23 @@ fn tests() -> Vec<TestCase> {
         ("unsafe_device_ids_and_pairings_are_rejected_without_touching_the_host", || {
             Box::pin(unsafe_device_ids_and_pairings_are_rejected_without_touching_the_host())
         }),
-        ("resending_install_after_the_plugin_disappeared_keeps_the_pairing", || {
-            Box::pin(resending_install_after_the_plugin_disappeared_keeps_the_pairing())
+        ("failed_reinstall_restores_the_previous_pairing", || {
+            Box::pin(failed_reinstall_restores_the_previous_pairing())
         }),
-        ("paired_device_updates_muted_without_herdr", || {
-            Box::pin(paired_device_updates_muted_without_herdr())
+        ("reinstall_overwrites_the_key_without_reinstalling_the_plugin", || {
+            Box::pin(reinstall_overwrites_the_key_without_reinstalling_the_plugin())
+        }),
+        ("update_muted_rewrites_only_muted_without_herdr", || {
+            Box::pin(update_muted_rewrites_only_muted_without_herdr())
+        }),
+        ("update_muted_keeps_key_and_endpoint_and_sorts_sessions", || {
+            Box::pin(update_muted_keeps_key_and_endpoint_and_sorts_sessions())
+        }),
+        ("update_muted_on_an_unpaired_device_is_rejected", || {
+            Box::pin(update_muted_on_an_unpaired_device_is_rejected())
+        }),
+        ("update_muted_rejects_multiline_sessions_and_read_only_devices", || {
+            Box::pin(update_muted_rejects_multiline_sessions_and_read_only_devices())
         }),
         ("install_and_remove_are_audited_without_the_key", || {
             Box::pin(install_and_remove_are_audited_without_the_key())

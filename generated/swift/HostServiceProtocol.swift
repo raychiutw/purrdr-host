@@ -40,6 +40,7 @@ extension HostServiceProtocol {
         case pushStatus(PushStatus)
         case pushInstall(PushInstall)
         case pushRemove(PushRemove)
+        case pushUpdateMuted(PushUpdateMuted)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -70,6 +71,7 @@ extension HostServiceProtocol {
             case "push.status": self = .pushStatus(try PushStatus(from: decoder))
             case "push.install": self = .pushInstall(try PushInstall(from: decoder))
             case "push.remove": self = .pushRemove(try PushRemove(from: decoder))
+            case "push.update_muted": self = .pushUpdateMuted(try PushUpdateMuted(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -141,13 +143,16 @@ extension HostServiceProtocol {
             case .pushRemove(let message):
                 try container.encode("push.remove", forKey: .type)
                 try message.encode(to: encoder)
+            case .pushUpdateMuted(let message):
+                try container.encode("push.update_muted", forKey: .type)
+                try message.encode(to: encoder)
             }
         }
 
         /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
         public var isWrite: Bool {
             switch self {
-            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove: return true
+            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove, .pushUpdateMuted: return true
             default: return false
             }
         }
@@ -179,6 +184,7 @@ extension HostServiceProtocol {
         case pushStatusResult(PushStatusResult)
         case pushInstallResult(PushInstallResult)
         case pushRemoveResult(PushRemoveResult)
+        case pushUpdateMutedResult(PushUpdateMutedResult)
         case errorMessage(ErrorMessage)
 
         private enum TypeKey: String, CodingKey {
@@ -211,6 +217,7 @@ extension HostServiceProtocol {
             case "push.status.result": self = .pushStatusResult(try PushStatusResult(from: decoder))
             case "push.install.result": self = .pushInstallResult(try PushInstallResult(from: decoder))
             case "push.remove.result": self = .pushRemoveResult(try PushRemoveResult(from: decoder))
+            case "push.update_muted.result": self = .pushUpdateMutedResult(try PushUpdateMutedResult(from: decoder))
             case "error": self = .errorMessage(try ErrorMessage(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
@@ -285,6 +292,9 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .pushRemoveResult(let message):
                 try container.encode("push.remove.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .pushUpdateMutedResult(let message):
+                try container.encode("push.update_muted.result", forKey: .type)
                 try message.encode(to: encoder)
             case .errorMessage(let message):
                 try container.encode("error", forKey: .type)
@@ -1388,7 +1398,7 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 開啟這支裝置在這台主機的通知：寫入推播配對(與 SSH 路徑相同的 ~/.purrdr/push-<device_id>/pairing,已有就覆寫),外掛還沒安裝就以本機使用者身分執行 herdr plugin install raychiutw/purrdr.host/host-plugin --yes(來源固定，app 不能指定)。安裝失敗時還原成寫入前的樣子並回 push_plugin_failed。已配對(配對檔存在)時重送等於更新配對檔(例如同步 muted):只以原子方式改寫配對檔、不呼叫 herdr,回應的 plugin_installed 一律是 true(要確認外掛請用 push.status)。
+    /// 開啟這支裝置在這台主機的通知：寫入推播配對(與 SSH 路徑相同的 ~/.purrdr/push-<device_id>/pairing,已有就覆寫),外掛還沒安裝就以本機使用者身分執行 herdr plugin install raychiutw/purrdr.host/host-plugin --yes(來源固定，app 不能指定)。安裝失敗時還原成寫入前的樣子(原有的配對保留)並回 push_plugin_failed。重送一律代表「以這把 key 重新配對」(覆寫配對檔;外掛已裝就不重裝)。只改靜音請用 push.update_muted。
     public struct PushInstall: Codable, Sendable, Equatable {
         public var requestId: String
         /// app 的推播裝置 id(與 SSH 路徑相同):1–64 個小寫英數與 -,不能是 plugin。不合格回 invalid_message。
@@ -1528,6 +1538,53 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
+    /// 同步這支裝置在這台主機的靜音清單(app 不保存配對密鑰，不能重送 push.install):只以原子方式改寫配對檔的 muted 行，保留 key 與 endpoint,不呼叫 herdr。沒有配對檔回 push_not_paired;muted 含控制字元或空字串回 invalid_message。
+    public struct PushUpdateMuted: Codable, Sendable, Equatable {
+        public var requestId: String
+        /// 同 push.install 的 device_id。
+        public var deviceId: String
+        /// 靜音的聊天(Agent 的 session 值),整份取代;空陣列表示取消全部靜音。
+        public var muted: [String]
+
+        public init(requestId: String, deviceId: String, muted: [String]) {
+            self.requestId = requestId
+            self.deviceId = deviceId
+            self.muted = muted
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case deviceId = "device_id"
+            case muted
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 靜音已更新。不問 herdr,plugin_installed 一律是 true(要確認外掛請用 push.status)。
+    public struct PushUpdateMutedResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var pluginInstalled: Bool
+        public var paired: Bool
+        public var otherDevices: Int
+
+        public init(requestId: String, pluginInstalled: Bool, paired: Bool, otherDevices: Int) {
+            self.requestId = requestId
+            self.pluginInstalled = pluginInstalled
+            self.paired = paired
+            self.otherDevices = otherDevices
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case pluginInstalled = "plugin_installed"
+            case paired
+            case otherDevices = "other_devices"
+        }
+    }
+}
+
+extension HostServiceProtocol {
     /// POST /v1/pair 的本文：以配對碼換裝置權杖。QR code 的內容是 purrdr://pair?address=<HTTPS 位址>&code=<配對碼>。
     public struct PairRequest: Codable, Sendable, Equatable {
         /// 大小寫與連字號不拘，例如 K7QM-2XPA。
@@ -1600,7 +1657,7 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
     public enum ErrorCode: String, Codable, Sendable, CaseIterable {
         case invalidMessage = "invalid_message"
         case handshakeRequired = "handshake_required"
@@ -1621,6 +1678,7 @@ extension HostServiceProtocol {
         case transcriptCompressed = "transcript_compressed"
         case fileChanged = "file_changed"
         case pushPluginFailed = "push_plugin_failed"
+        case pushNotPaired = "push_not_paired"
         case internalError = "internal_error"
     }
 }

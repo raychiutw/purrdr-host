@@ -11,7 +11,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use crate::herdr_cli::HerdrCli;
-use crate::protocol::{PushInstallResult, PushPairing, PushRemoveResult, PushStatusResult, ServerMessage};
+use crate::protocol::{PushInstallResult, PushPairing, PushRemoveResult, PushStatusResult, PushUpdateMutedResult, ServerMessage};
 
 /// 主機外掛(`host-plugin/herdr-plugin.toml`)的 id。
 pub const PLUGIN_ID: &str = "purrdr.push";
@@ -58,6 +58,15 @@ impl PushState {
         })
     }
 
+    pub fn muted_result(request_id: String, state: PushState) -> ServerMessage {
+        ServerMessage::PushUpdateMutedResult(PushUpdateMutedResult {
+            request_id,
+            plugin_installed: state.plugin_installed,
+            paired: state.paired,
+            other_devices: state.other_devices,
+        })
+    }
+
     pub fn unpaired_result(request_id: String, state: PushState) -> ServerMessage {
         ServerMessage::PushRemoveResult(PushRemoveResult {
             request_id,
@@ -76,6 +85,8 @@ pub(crate) enum PushFailure {
     HerdrUnavailable(String),
     /// herdr 指令失敗;帶 herdr 的輸出。
     Herdr(String),
+    /// 這支裝置在這台主機沒有推播配對。
+    NotPaired,
     /// 家目錄或檔案操作失敗。
     Internal(String),
 }
@@ -109,22 +120,13 @@ impl PushPlugin {
         self.state(device_id).await
     }
 
-    /// 寫入這支裝置的配對，外掛還沒安裝就安裝;安裝失敗時還原成寫入前的樣子。
-    /// 已配對時只更新配對檔(同步靜音),不呼叫 herdr。
+    /// 以這把 key 寫入(或覆寫)這支裝置的配對，外掛還沒安裝就安裝;安裝失敗時還原成寫入前的樣子。
     pub async fn pair(&self, device_id: &str, pairing: &PushPairing) -> Result<PushState, PushFailure> {
         validate_device_id(device_id)?;
-        let contents = pairing_file(pairing)?;
+        let contents = pairing_file(&pairing.endpoint, &pairing.key, pairing.muted.clone().unwrap_or_default())?;
         let _serial = self.serial.lock().await;
         let purrdr = self.purrdr_directory()?;
         let device_directory = purrdr.join(format!("push-{device_id}"));
-        if device_directory.join("pairing").is_file() {
-            write_private_file(&device_directory.join("pairing"), &contents)?;
-            return Ok(PushState {
-                plugin_installed: true,
-                paired: true,
-                other_devices: other_pairings(&purrdr, device_id),
-            });
-        }
         let plugin_installed = self.plugin_installed().await?;
         let before = FeatureBackup::take(&purrdr, &device_directory)?;
         write_feature(&device_directory, &[("pairing", contents.as_str())])?;
@@ -147,6 +149,30 @@ impl PushPlugin {
             }
         }
         self.state(device_id).await
+    }
+
+    /// 只改寫配對檔的靜音清單(保留 key 與 endpoint),不呼叫 herdr。
+    pub async fn update_muted(&self, device_id: &str, muted: Vec<String>) -> Result<PushState, PushFailure> {
+        validate_device_id(device_id)?;
+        validate_muted(&muted)?;
+        let _serial = self.serial.lock().await;
+        let purrdr = self.purrdr_directory()?;
+        let file = purrdr.join(format!("push-{device_id}")).join("pairing");
+        let current = match std::fs::read_to_string(&file) {
+            Ok(current) => current,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(PushFailure::NotPaired),
+            Err(error) => return Err(error.into()),
+        };
+        let value = |name: &str| current.lines().find_map(|line| line.strip_prefix(name)).map(str::to_owned);
+        let (Some(endpoint), Some(key)) = (value("endpoint="), value("key=")) else {
+            return Err(PushFailure::NotPaired);
+        };
+        write_private_file(&file, &pairing_file(&endpoint, &key, muted)?)?;
+        Ok(PushState {
+            plugin_installed: true,
+            paired: true,
+            other_devices: other_pairings(&purrdr, device_id),
+        })
     }
 
     /// 移除這支裝置的配對;沒有其他裝置的配對、且外掛是 Purrdr 裝的才移除外掛。
@@ -246,28 +272,32 @@ fn validate_device_id(device_id: &str) -> Result<(), PushFailure> {
 }
 
 /// 配對檔(app 的 `PushPairingFile`):一行一個 `名稱=值`,外掛的 sh 與 PowerShell 不需要 JSON 解析器。
-fn pairing_file(pairing: &PushPairing) -> Result<String, PushFailure> {
-    let endpoint_is_valid = pairing.endpoint.starts_with("https://")
-        && pairing.endpoint.len() <= MAX_ENDPOINT_LENGTH
-        && !pairing.endpoint.chars().any(|character| character.is_whitespace() || character.is_control());
+fn pairing_file(endpoint: &str, key: &str, mut muted: Vec<String>) -> Result<String, PushFailure> {
+    let endpoint_is_valid = endpoint.starts_with("https://")
+        && endpoint.len() <= MAX_ENDPOINT_LENGTH
+        && !endpoint.chars().any(|character| character.is_whitespace() || character.is_control());
     if !endpoint_is_valid {
         return Err(PushFailure::InvalidRequest("push endpoint must be an https URL"));
     }
-    let key_is_valid = pairing.key.len() == 64 && pairing.key.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    let key_is_valid = key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
     if !key_is_valid {
         return Err(PushFailure::InvalidRequest("push key must be 64 lowercase hex digits"));
     }
-    let mut muted = pairing.muted.clone().unwrap_or_default();
-    if muted.iter().any(|session| session.is_empty() || session.chars().any(char::is_control)) {
-        return Err(PushFailure::InvalidRequest("muted sessions must be single lines"));
-    }
+    validate_muted(&muted)?;
     muted.sort();
     muted.dedup();
-    let mut contents = format!("purrdr-push 1\nendpoint={}\nkey={}\n", pairing.endpoint, pairing.key);
+    let mut contents = format!("purrdr-push 1\nendpoint={endpoint}\nkey={key}\n");
     for session in muted {
         contents.push_str(&format!("muted={session}\n"));
     }
     Ok(contents)
+}
+
+fn validate_muted(muted: &[String]) -> Result<(), PushFailure> {
+    if muted.iter().any(|session| session.is_empty() || session.chars().any(char::is_control)) {
+        return Err(PushFailure::InvalidRequest("muted sessions must be single lines"));
+    }
+    Ok(())
 }
 
 /// 其他裝置的配對數(`push-*/pairing`,不含自己)。

@@ -320,6 +320,10 @@ impl ClientConnection {
                 let outcome = self.push.pair(&request.device_id, &request.pairing).await;
                 push_reply(request.request_id, outcome, PushState::paired_result)
             }
+            ClientMessage::PushUpdateMuted(request) => {
+                let outcome = self.push.update_muted(&request.device_id, request.muted).await;
+                push_reply(request.request_id, outcome, PushState::muted_result)
+            }
             ClientMessage::PushRemove(request) => push_reply(request.request_id, self.push.unpair(&request.device_id).await, PushState::unpaired_result),
             ClientMessage::PaneTerminalClose(close) => {
                 // drop:關閉 stdin(control 等同 release)並結束子行程。
@@ -816,6 +820,7 @@ fn push_reply(request_id: String, outcome: Result<PushState, PushFailure>, resul
         Err(PushFailure::InvalidRequest(message)) => error(Some(request_id), ErrorCode::InvalidMessage, message),
         Err(PushFailure::HerdrUnavailable(message)) => error(Some(request_id), ErrorCode::HerdrUnavailable, &message),
         Err(PushFailure::Herdr(message)) => error(Some(request_id), ErrorCode::PushPluginFailed, &message),
+        Err(PushFailure::NotPaired) => error(Some(request_id), ErrorCode::PushNotPaired, "this device has no push pairing on this host"),
         Err(PushFailure::Internal(message)) => error(Some(request_id), ErrorCode::InternalError, &message),
     }
 }
