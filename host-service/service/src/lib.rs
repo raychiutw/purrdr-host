@@ -26,6 +26,7 @@ pub mod running_service;
 pub mod state_directory;
 mod structure_operations;
 pub mod transcript;
+mod transcript_reads;
 mod transcript_session;
 pub mod update;
 pub mod uploads;

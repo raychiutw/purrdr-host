@@ -1,7 +1,7 @@
-//! 一條 app 連線上的對話紀錄操作(#59):記住這條連線定位過的路徑，視窗與追蹤只接受這些路徑。
+//! 一條 app 連線上的對話紀錄操作(#59):記住這條連線定位過的路徑，讀取只接受這些路徑與其 subagent 對話紀錄。
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -9,10 +9,12 @@ use tokio::task::JoinHandle;
 
 use crate::http::blocking;
 use crate::protocol::{
-    ErrorCode, ErrorMessage, ServerMessage, TranscriptFollow, TranscriptFollowResult, TranscriptLocateResult, TranscriptRecord, TranscriptStreamEnd,
-    TranscriptUnfollow, TranscriptUnfollowResult, TranscriptUpdate, TranscriptWindow, TranscriptWindowResult,
+    ErrorCode, ErrorMessage, ServerMessage, TranscriptDelegation, TranscriptDelegationResult, TranscriptFollow, TranscriptFollowResult, TranscriptLocateResult,
+    TranscriptPreview, TranscriptPreviews, TranscriptPreviewsResult, TranscriptRecord, TranscriptStreamEnd, TranscriptSubagent, TranscriptSubagentResult,
+    TranscriptUnfollow, TranscriptUnfollowResult, TranscriptUpdate, TranscriptWindow, TranscriptWindowResult, TranscriptWorkflow, TranscriptWorkflowResult,
 };
 use crate::transcript::{self, AgentSessionInfo, LongLineScan, Record, Tail, TranscriptEnvironment, TranscriptFailure};
+use crate::transcript_reads;
 
 /// 追蹤中的對話紀錄多久檢查一次(主機本機的檔案大小，不經 herdr)。
 const FOLLOW_INTERVAL: Duration = Duration::from_millis(250);
@@ -46,7 +48,7 @@ impl TranscriptSession {
 
     /// 開始追蹤：回應帶游標之後已有的完整行，之後新增的行以 `transcript.update` 推送。
     pub async fn follow(&mut self, request: TranscriptFollow) -> ServerMessage {
-        if !self.located.contains(&request.path) {
+        if !self.is_readable(&request.path) {
             return failure_message(request.request_id, TranscriptFailure::NotAllowed);
         }
         if self.streams.contains_key(&request.stream_id) {
@@ -127,9 +129,9 @@ impl TranscriptSession {
         self.located.iter().map(PathBuf::from).collect()
     }
 
-    /// 讀視窗;路徑必須是這條連線定位過的。
+    /// 讀視窗;路徑必須是這條連線可讀的(`is_readable`)。
     pub async fn window(&self, request: TranscriptWindow) -> ServerMessage {
-        if !self.located.contains(&request.path) {
+        if !self.is_readable(&request.path) {
             return failure_message(request.request_id, TranscriptFailure::NotAllowed);
         }
         let (Ok(end), Ok(lines)) = (u64::try_from(request.end), usize::try_from(request.lines)) else {
@@ -145,6 +147,108 @@ impl TranscriptSession {
                 start: chunk.start as i64,
                 end: chunk.end as i64,
                 records: protocol_records(chunk.records),
+            }),
+            Err(failure) => failure_message(request.request_id, failure),
+        }
+    }
+
+    /// 這條連線可讀的對話紀錄：定位過的，或其 session 資料夾 `subagents/` 底下的 `.jsonl`(subagent、workflow agent)。
+    fn is_readable(&self, path: &str) -> bool {
+        if self.located.contains(path) {
+            return true;
+        }
+        let requested = Path::new(path);
+        let lexically_safe = path.ends_with(".jsonl") && !requested.components().any(|component| component == Component::ParentDir);
+        lexically_safe
+            && self
+                .located
+                .iter()
+                .any(|located| requested.starts_with(transcript_reads::subagents_folder(Path::new(located))))
+    }
+
+    /// 列表預覽;每個路徑都必須是這條連線可讀的。讀不到的不在結果裡。
+    pub async fn previews(&self, request: TranscriptPreviews) -> ServerMessage {
+        if request.entries.iter().any(|entry| !self.is_readable(&entry.path)) {
+            return failure_message(request.request_id, TranscriptFailure::NotAllowed);
+        }
+        let entries = request.entries;
+        let previews = blocking(move || {
+            entries
+                .into_iter()
+                .filter_map(|entry| {
+                    let preview = transcript_reads::preview(Path::new(&entry.path), entry.known_version.as_deref()).ok()?;
+                    Some(TranscriptPreview {
+                        key: entry.key,
+                        change: preview.change,
+                        version: preview.version,
+                        lines: preview.lines,
+                    })
+                })
+                .collect()
+        })
+        .await;
+        ServerMessage::TranscriptPreviewsResult(TranscriptPreviewsResult {
+            request_id: request.request_id,
+            previews,
+        })
+    }
+
+    /// 找呼叫 id 啟動的 subagent 對話紀錄;路徑必須是這條連線可讀的。
+    pub async fn subagent(&self, request: TranscriptSubagent) -> ServerMessage {
+        if !self.is_readable(&request.path) {
+            return failure_message(request.request_id, TranscriptFailure::NotAllowed);
+        }
+        if !transcript_reads::is_safe_delegation_id(&request.call_id) {
+            return invalid(request.request_id, "call_id has unsafe characters");
+        }
+        let parent = PathBuf::from(&request.path);
+        match blocking(move || transcript_reads::find_subagent(&parent, &request.call_id)).await {
+            Ok(path) => ServerMessage::TranscriptSubagentResult(TranscriptSubagentResult {
+                request_id: request.request_id,
+                path: path.to_string_lossy().into_owned(),
+            }),
+            Err(failure) => failure_message(request.request_id, failure),
+        }
+    }
+
+    /// 讀 workflow 進度;路徑必須是這條連線可讀的。
+    pub async fn workflow(&self, request: TranscriptWorkflow) -> ServerMessage {
+        if !self.is_readable(&request.path) {
+            return failure_message(request.request_id, TranscriptFailure::NotAllowed);
+        }
+        if !transcript_reads::is_safe_delegation_id(&request.run_id) {
+            return invalid(request.request_id, "run_id has unsafe characters");
+        }
+        let transcript = PathBuf::from(&request.path);
+        let (run_id, known_checksum) = (request.run_id, request.known_checksum);
+        match blocking(move || transcript_reads::workflow(&transcript, &run_id, known_checksum.as_deref())).await {
+            Ok(progress) => ServerMessage::TranscriptWorkflowResult(TranscriptWorkflowResult {
+                request_id: request.request_id,
+                kind: progress.kind,
+                checksum: progress.checksum,
+                content: progress.content,
+            }),
+            Err(failure) => failure_message(request.request_id, failure),
+        }
+    }
+
+    /// 父對話紀錄中指名委派的行;路徑必須是這條連線可讀的。
+    pub async fn delegation(&self, request: TranscriptDelegation) -> ServerMessage {
+        if !self.is_readable(&request.path) {
+            return failure_message(request.request_id, TranscriptFailure::NotAllowed);
+        }
+        let agent_id = request.agent_id.unwrap_or_else(|| request.call_id.clone());
+        if ![&request.call_id, &agent_id].iter().all(|id| transcript_reads::is_safe_delegation_id(id)) {
+            return invalid(request.request_id, "call_id and agent_id must have only safe characters");
+        }
+        let transcript = PathBuf::from(&request.path);
+        let (call_id, known_checksum) = (request.call_id, request.known_checksum);
+        let lines = blocking(move || transcript_reads::delegation_lines(&transcript, &[&call_id, &agent_id], known_checksum.as_deref())).await;
+        match lines {
+            Ok(lines) => ServerMessage::TranscriptDelegationResult(TranscriptDelegationResult {
+                request_id: request.request_id,
+                checksum: lines.checksum,
+                records: lines.records.map(protocol_records),
             }),
             Err(failure) => failure_message(request.request_id, failure),
         }

@@ -35,6 +35,14 @@ pub enum ClientMessage {
     TranscriptFollow(TranscriptFollow),
     #[serde(rename = "transcript.unfollow")]
     TranscriptUnfollow(TranscriptUnfollow),
+    #[serde(rename = "transcript.previews")]
+    TranscriptPreviews(TranscriptPreviews),
+    #[serde(rename = "transcript.subagent")]
+    TranscriptSubagent(TranscriptSubagent),
+    #[serde(rename = "transcript.workflow")]
+    TranscriptWorkflow(TranscriptWorkflow),
+    #[serde(rename = "transcript.delegation")]
+    TranscriptDelegation(TranscriptDelegation),
     #[serde(rename = "pane.send_text")]
     PaneSendText(PaneSendText),
     #[serde(rename = "agent.prompt")]
@@ -118,6 +126,14 @@ pub enum ServerMessage {
     TranscriptUpdate(TranscriptUpdate),
     #[serde(rename = "transcript.unfollow.result")]
     TranscriptUnfollowResult(TranscriptUnfollowResult),
+    #[serde(rename = "transcript.previews.result")]
+    TranscriptPreviewsResult(TranscriptPreviewsResult),
+    #[serde(rename = "transcript.subagent.result")]
+    TranscriptSubagentResult(TranscriptSubagentResult),
+    #[serde(rename = "transcript.workflow.result")]
+    TranscriptWorkflowResult(TranscriptWorkflowResult),
+    #[serde(rename = "transcript.delegation.result")]
+    TranscriptDelegationResult(TranscriptDelegationResult),
     #[serde(rename = "pane.send_text.result")]
     PaneSendTextResult(PaneSendTextResult),
     #[serde(rename = "agent.prompt.result")]
@@ -516,6 +532,116 @@ pub struct TranscriptUnfollow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptUnfollowResult {
     pub request_id: String,
+}
+
+/// 列表預覽(raychiutw/purrdr.host#17):一次讀多個對話紀錄的檔尾。path 必須是這條連線定位過的，任一個不是就整個請求回 transcript_not_allowed。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptPreviews {
+    pub request_id: String,
+    pub entries: Vec<TranscriptPreviewEntry>,
+}
+
+/// 一個要讀預覽的對話紀錄。known_version 是上次這個主機服務回的 version(app 原樣帶回，不解讀)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptPreviewEntry {
+    pub key: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_version: Option<String>,
+}
+
+/// 每個讀得到的對話紀錄一項(讀不到的不在結果裡，同 SSH 的預覽腳本)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptPreviewsResult {
+    pub request_id: String,
+    pub previews: Vec<TranscriptPreview>,
+}
+
+/// 一個對話紀錄的預覽。lines 是剝除圖片後的行(同 SSH 預覽腳本，不帶原始長度):whole 是最後 48000 bytes(第一行可能被切在中間)、appended 是 known_version 之後附加的部分、unchanged 沒有內容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptPreview {
+    pub key: String,
+    pub change: TranscriptPreviewChange,
+    pub version: String,
+    pub lines: Vec<String>,
+}
+
+/// 這次讀到的範圍:unchanged 與 known_version 相同、appended 只有附加的部分、whole 整段檔尾。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TranscriptPreviewChange {
+    #[serde(rename = "unchanged")]
+    Unchanged,
+    #[serde(rename = "appended")]
+    Appended,
+    #[serde(rename = "whole")]
+    Whole,
+}
+
+/// 找呼叫 call_id 啟動的 subagent 對話紀錄(raychiutw/purrdr.host#17):在 path 的 session 資料夾的 subagents/ 下找 toolUseId 完全等於 call_id 的 agent-*.meta.json。path 必須是這條連線可讀的對話紀錄。沒有 meta 回 transcript_absent,不只一個回 transcript_ambiguous。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptSubagent {
+    pub request_id: String,
+    pub path: String,
+    pub call_id: String,
+}
+
+/// subagent 對話紀錄的路徑。session 資料夾 subagents/ 底下的 .jsonl 都可以讀視窗與追蹤。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptSubagentResult {
+    pub request_id: String,
+    pub path: String,
+}
+
+/// 讀 workflow 進度(raychiutw/purrdr.host#17):path 的 session 資料夾的 workflows/<run_id>.json(結束才寫)優先，否則 subagents/workflows/<run_id>/journal.jsonl。兩個都沒有回 transcript_absent。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptWorkflow {
+    pub request_id: String,
+    pub path: String,
+    pub run_id: String,
+    /// 上次回的 checksum;相同時不回內容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_checksum: Option<String>,
+}
+
+/// kind 是讀到哪個檔(run 或 journal);content 是檔案原樣內容，checksum 等於 known_checksum 時省略。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptWorkflowResult {
+    pub request_id: String,
+    pub kind: TranscriptWorkflowKind,
+    pub checksum: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
+/// run:workflows/<run_id>.json;journal:subagents/workflows/<run_id>/journal.jsonl。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TranscriptWorkflowKind {
+    #[serde(rename = "run")]
+    Run,
+    #[serde(rename = "journal")]
+    Journal,
+}
+
+/// 父對話紀錄中含 call_id 或 agent_id 的行(委派是否結束，raychiutw/purrdr.host#17)。path 必須是這條連線可讀的對話紀錄。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptDelegation {
+    pub request_id: String,
+    pub path: String,
+    pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// 上次回的 checksum;相同時不回內容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_checksum: Option<String>,
+}
+
+/// 這些行(剝除圖片後)的 checksum 與行;checksum 等於 known_checksum 時省略 records。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptDelegationResult {
+    pub request_id: String,
+    pub checksum: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records: Option<Vec<TranscriptRecord>>,
 }
 
 /// 對 Pane 送出文字(herdr pane.send_text),不補 Enter。
@@ -1069,7 +1195,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
