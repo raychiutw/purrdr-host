@@ -525,7 +525,7 @@ extension HostServiceProtocol {
 
         public init(version: String, `protocol`: Int, capabilities: [String]) {
             self.version = version
-            self.protocol = `protocol`
+            self.`protocol` = `protocol`
             self.capabilities = capabilities
         }
 
@@ -2208,18 +2208,18 @@ extension HostServiceProtocol {
         /// 總 bytes。
         public var size: Int
         /// 主機檔名的副檔名(不含點):1–16 個英數字元，存成小寫;沒帶時不加副檔名。不合格回 invalid_message。
-        public var extension: String?
+        public var `extension`: String?
 
-        public init(requestId: String, size: Int, extension: String? = nil) {
+        public init(requestId: String, size: Int, `extension`: String? = nil) {
             self.requestId = requestId
             self.size = size
-            self.extension = extension
+            self.`extension` = `extension`
         }
 
         private enum CodingKeys: String, CodingKey {
             case requestId = "request_id"
             case size
-            case extension
+            case `extension`
         }
     }
 }
