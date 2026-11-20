@@ -14,7 +14,7 @@ use crate::protocol::{
     WorkspaceRenameResult, WorktreeCreate, WorktreeCreateResult,
 };
 
-/// 建立 workspace 或 worktree 時 herdr 可能要等 shell 與 git;比照 app 的 60 秒期限。
+/// 建立 workspace 或 worktree 時 herdr 可能要等 shell 與 git;比 app 的 60 秒期限短，app 放棄前先收到結果或錯誤。
 const CREATION_WAIT: Duration = Duration::from_secs(50);
 
 /// workspace 名稱的長度上限(字元)。

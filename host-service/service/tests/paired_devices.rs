@@ -150,3 +150,20 @@ async fn revoking_from_the_app_is_audited_without_tokens() {
     assert!(!audit_log.contains(&lost_phone.device_token));
     assert!(!audit_log.contains(&service.device_token));
 }
+
+#[tokio::test]
+async fn listing_or_revoking_devices_before_hello_requires_handshake() {
+    let herdr = herdr().await;
+    let service = start_service(herdr.socket.clone()).await;
+    let lost_phone = service.pair_device("遺失的手機", false);
+    let mut client = TestClient::connect_with_token(&service, Some(&service.device_token)).await;
+
+    let listed = client.request(json!({"type": "devices.list", "request_id": "r1"})).await;
+    let revoked = client
+        .request(json!({"type": "devices.revoke", "request_id": "r2", "device_id": lost_phone.device.device_id}))
+        .await;
+
+    assert_eq!(listed["code"], "handshake_required", "{listed}");
+    assert_eq!(revoked["code"], "handshake_required", "{revoked}");
+    assert!(service.store().authenticate(&lost_phone.device_token).is_ok(), "沒有 hello 就不撤銷");
+}

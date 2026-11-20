@@ -16,6 +16,25 @@ use serde_json::{Value, json};
 
 static NEXT_DIRECTORY: AtomicU32 = AtomicU32::new(0);
 
+/// 假主機服務的埠取自系統不會自動分配的範圍(Linux 臨時埠從 32768、macOS／Windows 從 49152 起),
+/// 停掉再重啟之間不會被別的測試的 `bind(0)` 或對外連線拿走。
+const RESERVED_PORTS: std::ops::Range<u32> = 20_000..32_000;
+static NEXT_RESERVED_PORT: AtomicU32 = AtomicU32::new(0);
+
+/// 這個測試程序專用、目前沒人在聽的埠。
+pub fn reserved_port() -> u16 {
+    let span = RESERVED_PORTS.end - RESERVED_PORTS.start;
+    // 同時跑的其他測試程序從不同位置開始。
+    let process_offset = std::process::id().wrapping_mul(97) % span;
+    loop {
+        let index = (process_offset + NEXT_RESERVED_PORT.fetch_add(1, Ordering::SeqCst)) % span;
+        let port = u16::try_from(RESERVED_PORTS.start + index).unwrap();
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+}
+
 pub const FQDN: &str = "studio.tail1234.ts.net";
 pub const LAUNCH_AGENT_LABEL: &str = "com.raychiu.purrdr.host-service";
 pub const SYSTEMD_UNIT: &str = "purrdr-host-service.service";

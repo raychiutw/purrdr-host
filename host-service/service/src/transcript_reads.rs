@@ -8,6 +8,7 @@ use std::time::UNIX_EPOCH;
 use sha2::{Digest, Sha256};
 
 use crate::protocol::{TranscriptPreviewChange, TranscriptWorkflowKind};
+use crate::text_format::hex;
 use crate::transcript::{Record, TranscriptFailure, strip_images};
 
 /// 列表預覽最多讀的檔尾 bytes(同 SSH 預覽腳本的 `tail -c 48000`)。
@@ -80,7 +81,7 @@ fn anchor(file: &mut File, end: u64) -> Result<String, TranscriptFailure> {
         return Ok("0".to_owned());
     }
     let bytes = read_range(file, end.saturating_sub(ANCHOR_BYTES), end)?;
-    Ok(Sha256::digest(&bytes).iter().take(8).map(|byte| format!("{byte:02x}")).collect())
+    Ok(hex(&Sha256::digest(&bytes)[..8]))
 }
 
 /// 依換行切開、剝除圖片;空行略過(同 app 解析 SSH 輸出)。
@@ -198,7 +199,7 @@ pub fn delegation_lines(transcript: &Path, ids: &[&str], known_checksum: Option<
             text: String::from_utf8_lossy(&stripped).into_owned(),
         });
     }
-    let checksum: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+    let checksum = hex(&hasher.finalize());
     let records = (known_checksum != Some(checksum.as_str())).then_some(records);
     Ok(DelegationLines { checksum, records })
 }
@@ -208,7 +209,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn checksum(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+    hex(&Sha256::digest(bytes))
 }
 
 fn open(path: &Path) -> Result<File, TranscriptFailure> {

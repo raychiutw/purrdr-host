@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::push_plugin::PairingCredentials;
 use crate::update::UpdateEvent;
 
 /// 送一則推播;回 HTTP 狀態碼，連不上時回錯誤。
@@ -144,12 +145,14 @@ struct Pairing {
 
 impl Pairing {
     fn read(directory: &Path) -> Option<Pairing> {
-        let contents = std::fs::read_to_string(directory.join("pairing")).ok()?;
-        let value = |name: &str| contents.lines().find_map(|line| line.strip_prefix(name)).map(str::to_owned);
+        let credentials = PairingCredentials::parse(&std::fs::read_to_string(directory.join("pairing")).ok()?)?;
+        if credentials.endpoint.is_empty() || credentials.key.is_empty() {
+            return None;
+        }
         Some(Pairing {
             directory: directory.to_owned(),
-            endpoint: value("endpoint=").filter(|endpoint| !endpoint.is_empty())?,
-            key: value("key=").filter(|key| !key.is_empty())?,
+            endpoint: credentials.endpoint,
+            key: credentials.key,
         })
     }
 

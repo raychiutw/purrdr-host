@@ -25,6 +25,7 @@ pub mod remote_management;
 pub mod running_service;
 pub mod state_directory;
 mod structure_operations;
+mod text_format;
 pub mod transcript;
 mod transcript_reads;
 mod transcript_session;

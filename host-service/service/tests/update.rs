@@ -6,7 +6,9 @@ mod support;
 use std::time::Duration;
 
 use install_support::release::{FakeReleaseServer, sha256_hex};
-use install_support::{FakeSystem, LAUNCH_AGENT_LABEL, RUN_VALUE, SYSTEMD_UNIT, TEAM_ID, TestHost, executable_names, fake_host_service, snapshot};
+use install_support::{
+    FakeSystem, LAUNCH_AGENT_LABEL, RUN_VALUE, SYSTEMD_UNIT, TEAM_ID, TestHost, executable_names, fake_host_service, reserved_port, snapshot,
+};
 use purrdr_host_service::agent_activity::HerdrAgentActivity;
 use purrdr_host_service::install::{InstallPlatform, InstalledService, Installer};
 use purrdr_host_service::update::{
@@ -19,10 +21,6 @@ const INSTALLED: &str = "0.5.0";
 
 fn version(text: &str) -> Version {
     text.parse().unwrap()
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
 fn is_listening(port: u16) -> bool {
@@ -42,7 +40,7 @@ impl InstalledHost {
         for name in executable_names(platform) {
             std::fs::write(host.downloads.0.join(name), fake_host_service(INSTALLED, name)).unwrap();
         }
-        let port = free_port();
+        let port = reserved_port();
         let mut system = FakeSystem::ready(&host.home.0);
         system.service_port = Some(port);
         let mut installer = Installer::new(host.environment(), system);
@@ -566,6 +564,24 @@ fn manual_update_does_not_wait_for_agents_and_the_next_check_ends_the_deferral_s
     assert_eq!(agents.asked, asked_before_manual_update, "已是最新時不必問 Agent 狀態");
     let status = update_status(&installed);
     assert!(status.get("deferred_count").is_none(), "{status}");
+}
+
+#[test]
+fn successful_manual_update_clears_the_deferral_count() {
+    let mut installed = InstalledHost::new(InstallPlatform::Linux);
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::Linux, "0.5.1", "");
+    let mut updater = installed.updater(&server);
+    assert!(matches!(
+        updater.automatic(&mut FakeLauncher::default(), &mut FakeAgents::working()),
+        AutomaticOutcome::Deferred { .. }
+    ));
+
+    let by_hand = updater.apply();
+
+    assert!(matches!(by_hand, Ok(UpdateOutcome::Updated { .. })), "{by_hand:?}");
+    let status = update_status(&installed);
+    assert!(status.get("deferred_count").is_none(), "手動更新成功後歸零：{status}");
 }
 
 /// 以 herdr 的 `session.snapshot` 判斷 Agent 狀態，跑一次自動檢查(`snapshot` 為 None 時 herdr 沒在跑)。

@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+use crate::text_format::hex;
+
 /// 配對碼的有效時間。
 pub const PAIRING_CODE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
@@ -290,10 +292,6 @@ impl DeviceStore {
 
 fn fill_random(buffer: &mut [u8]) -> io::Result<()> {
     getrandom::fill(buffer).map_err(|error| io::Error::other(error.to_string()))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn sha256_hex(text: &str) -> String {
