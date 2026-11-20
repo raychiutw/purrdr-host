@@ -25,6 +25,7 @@ pub mod state_directory;
 pub mod transcript;
 mod transcript_session;
 pub mod update;
+pub mod uploads;
 
 mod service_main;
 
@@ -113,6 +114,8 @@ impl HostServiceConfig {
 pub struct RunningHostService {
     local_addr: SocketAddr,
     accept_loop: tokio::task::JoinHandle<()>,
+    /// 定期刪除超過 7 天的上傳檔;找不到家目錄時沒有。
+    upload_cleanup: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RunningHostService {
@@ -130,6 +133,9 @@ impl RunningHostService {
 impl Drop for RunningHostService {
     fn drop(&mut self) {
         self.accept_loop.abort();
+        if let Some(upload_cleanup) = &self.upload_cleanup {
+            upload_cleanup.abort();
+        }
     }
 }
 
@@ -137,6 +143,11 @@ impl Drop for RunningHostService {
 pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostService> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port)).await?;
     let local_addr = listener.local_addr()?;
+    let upload_cleanup = config
+        .transcripts
+        .home
+        .as_deref()
+        .map(|home| uploads::spawn_cleanup(uploads::UploadDirectory::under_home(home), std::time::SystemTime::now));
     let router = http::router(http::ServiceContext {
         herdr: HerdrClient::new(config.herdr_socket),
         push: push_plugin::PushPlugin::new(config.herdr_cli.clone(), config.transcripts.home.clone()),
@@ -156,5 +167,9 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
             eprintln!("host service stopped: {error}");
         }
     });
-    Ok(RunningHostService { local_addr, accept_loop })
+    Ok(RunningHostService {
+        local_addr,
+        accept_loop,
+        upload_cleanup,
+    })
 }

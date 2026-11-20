@@ -25,13 +25,15 @@ use crate::http::{ServiceContext, blocking};
 use crate::pane_terminal::{self, PaneTerminal};
 use crate::protocol::{
     Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, ErrorCode, ErrorMessage, EventsEnded, EventsSubscribe,
-    EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus, HerdrServer, PROTOCOL_VERSION,
-    PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent,
-    TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
+    EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus, FileUploadChunk, FileUploadChunkResult,
+    FileUploadStart, FileUploadStartResult, HerdrServer, PROTOCOL_VERSION, PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult,
+    PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome,
+    Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
 use crate::transcript::AgentSessionInfo;
 use crate::transcript_session::TranscriptSession;
+use crate::uploads::{ChunkOutcome, PendingUpload, UploadDirectory, UploadFailure};
 
 /// 權杖無效或已撤銷時的 close code(4000–4999 由應用程式自訂)。
 pub const UNAUTHORIZED_CLOSE_CODE: u16 = 4401;
@@ -86,6 +88,8 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         file_pacing: RequestPacing::default(),
         file_snapshot: None,
         push: context.push.clone(),
+        uploads: context.files.home.as_deref().map(UploadDirectory::under_home),
+        pending_uploads: HashMap::new(),
     };
     let handler = tokio::spawn(handle_requests(connection, request_queue, context, device_token));
     // 逾時沒收到任何 frame(含 pong)就當作 app 已經不在。
@@ -216,6 +220,10 @@ struct ClientConnection {
     /// 主機取檔最近一次從頭讀的快照。
     file_snapshot: Option<FileSnapshot>,
     push: PushPlugin,
+    /// 家目錄的上傳資料夾;找不到家目錄時不能上傳。
+    uploads: Option<UploadDirectory>,
+    /// 進行中的上傳，以 upload_id(開始請求的 request_id)為 key;連線結束時一併刪掉暫存檔。
+    pending_uploads: HashMap<String, PendingUpload>,
 }
 
 impl Drop for ClientConnection {
@@ -249,8 +257,9 @@ impl ClientConnection {
         };
         if message.is_write() {
             // 稽核只記操作種類與目標 Pane,不記按鍵或 prompt 內容;串流上的輸入(沒有請求識別碼，例如 Pane 終端機的按鍵)
-            // 不逐則記，Pane 終端機只在開啟時記一筆。
-            if request_id.is_some() {
+            // 不逐則記，Pane 終端機只在開啟時記一筆;上傳的分塊也不逐則記，完成或失敗時另記一筆 upload。
+            let upload_chunk = matches!(message, ClientMessage::FileUploadChunk(_));
+            if request_id.is_some() && !(upload_chunk && !device.read_only) {
                 self.audit.record(
                     AuditEvent::Write {
                         device_id: device.device_id.clone(),
@@ -325,6 +334,8 @@ impl ClientConnection {
                 push_reply(request.request_id, outcome, PushState::muted_result)
             }
             ClientMessage::PushRemove(request) => push_reply(request.request_id, self.push.unpair(&request.device_id).await, PushState::unpaired_result),
+            ClientMessage::FileUploadStart(request) => self.upload_start(request, device).await,
+            ClientMessage::FileUploadChunk(request) => self.upload_chunk(request, device).await,
             ClientMessage::PaneTerminalClose(close) => {
                 // drop:關閉 stdin(control 等同 release)並結束子行程。
                 self.terminals.remove(&close.stream_id);
@@ -593,6 +604,89 @@ impl ClientConnection {
         })
     }
 
+    async fn upload_start(&mut self, request: FileUploadStart, device: &Device) -> ServerMessage {
+        if !self.handshaken {
+            return error(Some(request.request_id), ErrorCode::HandshakeRequired, "send hello first");
+        }
+        let Some(uploads) = self.uploads.clone() else {
+            return error(
+                Some(request.request_id),
+                ErrorCode::InternalError,
+                "host service cannot find the home directory",
+            );
+        };
+        let Ok(size) = u64::try_from(request.size) else {
+            return error(Some(request.request_id), ErrorCode::InvalidMessage, "size must not be negative");
+        };
+        let extension = request.extension.clone();
+        match blocking(move || uploads.begin(size, extension.as_deref())).await {
+            Ok(pending) => {
+                self.pending_uploads.insert(request.request_id.clone(), pending);
+                ServerMessage::FileUploadStartResult(FileUploadStartResult {
+                    upload_id: request.request_id.clone(),
+                    request_id: request.request_id,
+                })
+            }
+            Err(failure) => {
+                self.audit_upload(device, None, size, failure.audit_result());
+                upload_error(request.request_id, failure)
+            }
+        }
+    }
+
+    fn audit_upload(&self, device: &Device, path: Option<String>, size: u64, result: &'static str) {
+        self.audit.record(
+            AuditEvent::Upload {
+                device_id: device.device_id.clone(),
+                path,
+                size,
+                result,
+            },
+            SystemTime::now(),
+        );
+    }
+
+    /// 依序寫入分塊;失敗時這次上傳作廢(drop 時刪掉暫存檔)。
+    async fn upload_chunk(&mut self, request: FileUploadChunk, device: &Device) -> ServerMessage {
+        let Some(mut pending) = self.pending_uploads.remove(&request.upload_id) else {
+            return error(Some(request.request_id), ErrorCode::InvalidMessage, "unknown upload_id");
+        };
+        let Ok(bytes) = BASE64.decode(&request.bytes) else {
+            return error(Some(request.request_id), ErrorCode::InvalidMessage, "bytes is not base64");
+        };
+        let offset = u64::try_from(request.offset).unwrap_or(u64::MAX);
+        let (pending, outcome) = blocking(move || {
+            let outcome = pending.append(offset, &bytes);
+            (pending, outcome)
+        })
+        .await;
+        match outcome {
+            Ok(ChunkOutcome::Partial { received }) => {
+                self.pending_uploads.insert(request.upload_id.clone(), pending);
+                ServerMessage::FileUploadChunkResult(FileUploadChunkResult {
+                    request_id: request.request_id,
+                    upload_id: request.upload_id,
+                    received: received as i64,
+                    path: None,
+                })
+            }
+            Ok(ChunkOutcome::Stored { received, path }) => {
+                let path = path.to_string_lossy().into_owned();
+                self.audit_upload(device, Some(path.clone()), pending.size(), "stored");
+                ServerMessage::FileUploadChunkResult(FileUploadChunkResult {
+                    request_id: request.request_id,
+                    upload_id: request.upload_id,
+                    received: received as i64,
+                    path: Some(path),
+                })
+            }
+            Err(failure) => {
+                self.audit_upload(device, None, pending.size(), failure.audit_result());
+                upload_error(request.request_id, failure)
+            }
+        }
+    }
+
     /// 對話紀錄只能依 herdr 目前回報的 agent_session 定位(#59)。
     async fn transcript_locate(&mut self, request: TranscriptLocate) -> ServerMessage {
         if !self.handshaken {
@@ -822,6 +916,14 @@ fn push_reply(request_id: String, outcome: Result<PushState, PushFailure>, resul
         Err(PushFailure::Herdr(message)) => error(Some(request_id), ErrorCode::PushPluginFailed, &message),
         Err(PushFailure::NotPaired) => error(Some(request_id), ErrorCode::PushNotPaired, "this device has no push pairing on this host"),
         Err(PushFailure::Internal(message)) => error(Some(request_id), ErrorCode::InternalError, &message),
+    }
+}
+
+fn upload_error(request_id: String, failure: UploadFailure) -> ServerMessage {
+    match failure {
+        UploadFailure::TooLarge(message) => error(Some(request_id), ErrorCode::UploadTooLarge, &message),
+        UploadFailure::Invalid(message) => error(Some(request_id), ErrorCode::InvalidMessage, message),
+        UploadFailure::Storage(storage_error) => error(Some(request_id), ErrorCode::InternalError, &format!("cannot write the upload: {storage_error}")),
     }
 }
 

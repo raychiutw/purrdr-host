@@ -49,6 +49,14 @@ pub enum AuditEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         size: Option<u64>,
     },
+    /// 上傳(raychiutw/purrdr.host#16):存成的路徑、宣告的大小與結果(stored、too_large、invalid、failed),不記內容。
+    Upload {
+        device_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        size: u64,
+        result: &'static str,
+    },
 }
 
 /// 誰撤銷的。

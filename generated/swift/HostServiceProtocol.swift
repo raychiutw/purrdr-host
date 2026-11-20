@@ -41,6 +41,8 @@ extension HostServiceProtocol {
         case pushInstall(PushInstall)
         case pushRemove(PushRemove)
         case pushUpdateMuted(PushUpdateMuted)
+        case fileUploadStart(FileUploadStart)
+        case fileUploadChunk(FileUploadChunk)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -72,6 +74,8 @@ extension HostServiceProtocol {
             case "push.install": self = .pushInstall(try PushInstall(from: decoder))
             case "push.remove": self = .pushRemove(try PushRemove(from: decoder))
             case "push.update_muted": self = .pushUpdateMuted(try PushUpdateMuted(from: decoder))
+            case "file.upload.start": self = .fileUploadStart(try FileUploadStart(from: decoder))
+            case "file.upload.chunk": self = .fileUploadChunk(try FileUploadChunk(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -146,13 +150,19 @@ extension HostServiceProtocol {
             case .pushUpdateMuted(let message):
                 try container.encode("push.update_muted", forKey: .type)
                 try message.encode(to: encoder)
+            case .fileUploadStart(let message):
+                try container.encode("file.upload.start", forKey: .type)
+                try message.encode(to: encoder)
+            case .fileUploadChunk(let message):
+                try container.encode("file.upload.chunk", forKey: .type)
+                try message.encode(to: encoder)
             }
         }
 
         /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
         public var isWrite: Bool {
             switch self {
-            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove, .pushUpdateMuted: return true
+            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove, .pushUpdateMuted, .fileUploadStart, .fileUploadChunk: return true
             default: return false
             }
         }
@@ -185,6 +195,8 @@ extension HostServiceProtocol {
         case pushInstallResult(PushInstallResult)
         case pushRemoveResult(PushRemoveResult)
         case pushUpdateMutedResult(PushUpdateMutedResult)
+        case fileUploadStartResult(FileUploadStartResult)
+        case fileUploadChunkResult(FileUploadChunkResult)
         case errorMessage(ErrorMessage)
 
         private enum TypeKey: String, CodingKey {
@@ -218,6 +230,8 @@ extension HostServiceProtocol {
             case "push.install.result": self = .pushInstallResult(try PushInstallResult(from: decoder))
             case "push.remove.result": self = .pushRemoveResult(try PushRemoveResult(from: decoder))
             case "push.update_muted.result": self = .pushUpdateMutedResult(try PushUpdateMutedResult(from: decoder))
+            case "file.upload.start.result": self = .fileUploadStartResult(try FileUploadStartResult(from: decoder))
+            case "file.upload.chunk.result": self = .fileUploadChunkResult(try FileUploadChunkResult(from: decoder))
             case "error": self = .errorMessage(try ErrorMessage(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
@@ -295,6 +309,12 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .pushUpdateMutedResult(let message):
                 try container.encode("push.update_muted.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .fileUploadStartResult(let message):
+                try container.encode("file.upload.start.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .fileUploadChunkResult(let message):
+                try container.encode("file.upload.chunk.result", forKey: .type)
                 try message.encode(to: encoder)
             case .errorMessage(let message):
                 try container.encode("error", forKey: .type)
@@ -1585,6 +1605,98 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
+    /// 上傳圖片或檔案(raychiutw/purrdr.host#16):開始一次分塊上傳。主機服務在家目錄的 .purrdr/uploads/ 建暫存檔，檔名由主機服務產生(不採用 app 給的名稱),超過 7 天的上傳檔定期刪除。size 超過 x-maximum-file-size 回 upload_too_large。中繼資料剝除在 app 端做，主機服務不解析內容。
+    public struct FileUploadStart: Codable, Sendable, Equatable {
+        /// 也是這次上傳的 upload_id。
+        public var requestId: String
+        /// 總 bytes。
+        public var size: Int
+        /// 主機檔名的副檔名(不含點):1–16 個英數字元，存成小寫;沒帶時不加副檔名。不合格回 invalid_message。
+        public var extension: String?
+
+        public init(requestId: String, size: Int, extension: String? = nil) {
+            self.requestId = requestId
+            self.size = size
+            self.extension = extension
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case size
+            case extension
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 上傳已開始，之後以 upload_id 送分塊。
+    public struct FileUploadStartResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var uploadId: String
+
+        public init(requestId: String, uploadId: String) {
+            self.requestId = requestId
+            self.uploadId = uploadId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case uploadId = "upload_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 依序送一塊內容(解碼後最多 x-maximum-file-chunk bytes,超過回 upload_too_large)。offset 必須等於已收到的 bytes,超過 size 或 upload_id 不是這條連線開始的都回 invalid_message,失敗後這次上傳作廢。收滿 size 時存成正式檔。連線結束時未完成的上傳刪掉。
+    public struct FileUploadChunk: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var uploadId: String
+        public var offset: Int
+        /// 標準 base64。
+        public var bytes: String
+
+        public init(requestId: String, uploadId: String, offset: Int, bytes: String) {
+            self.requestId = requestId
+            self.uploadId = uploadId
+            self.offset = offset
+            self.bytes = bytes
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case uploadId = "upload_id"
+            case offset
+            case bytes
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 分塊已寫入。收滿 size 時帶 path:主機上的絕對路徑，app 放進 prompt。
+    public struct FileUploadChunkResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var uploadId: String
+        /// 目前已收到的 bytes。
+        public var received: Int
+        public var path: String?
+
+        public init(requestId: String, uploadId: String, received: Int, path: String? = nil) {
+            self.requestId = requestId
+            self.uploadId = uploadId
+            self.received = received
+            self.path = path
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case uploadId = "upload_id"
+            case received
+            case path
+        }
+    }
+}
+
+extension HostServiceProtocol {
     /// POST /v1/pair 的本文：以配對碼換裝置權杖。QR code 的內容是 purrdr://pair?address=<HTTPS 位址>&code=<配對碼>。
     public struct PairRequest: Codable, Sendable, Equatable {
         /// 大小寫與連字號不拘，例如 K7QM-2XPA。
@@ -1657,7 +1769,7 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的;transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
     public enum ErrorCode: String, Codable, Sendable, CaseIterable {
         case invalidMessage = "invalid_message"
         case handshakeRequired = "handshake_required"
@@ -1679,6 +1791,7 @@ extension HostServiceProtocol {
         case fileChanged = "file_changed"
         case pushPluginFailed = "push_plugin_failed"
         case pushNotPaired = "push_not_paired"
+        case uploadTooLarge = "upload_too_large"
         case internalError = "internal_error"
     }
 }
