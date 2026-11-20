@@ -21,6 +21,7 @@ mod pane_terminal;
 mod push_plugin;
 #[rustfmt::skip] // 由 codegen 產生。
 pub mod protocol;
+pub mod remote_management;
 pub mod running_service;
 pub mod state_directory;
 mod structure_operations;
@@ -54,6 +55,8 @@ pub struct HostServiceConfig {
     pub transcripts: transcript::TranscriptEnvironment,
     /// 主機的暫存目錄(`TMPDIR`／`TEMP`);主機取檔放行 Agent 提到的暫存檔。
     pub temporary_directory: Option<PathBuf>,
+    /// 從 app 管理主機服務(更新、自動更新);None 時 app 收到 host_service_not_installed。
+    pub service_management: Option<remote_management::ServiceManagement>,
 }
 
 /// 預設埠(127.0.0.1 上)。
@@ -108,6 +111,9 @@ impl HostServiceConfig {
             heartbeat: Heartbeat::default(),
             transcripts: transcript::TranscriptEnvironment::resolve(platform, environment),
             temporary_directory: Some(std::env::temp_dir()),
+            service_management: crate::install::HostEnvironment::from_process()
+                .ok()
+                .and_then(remote_management::for_installed_copy),
         })
     }
 }
@@ -163,6 +169,7 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
             state_directory: config.state_directory.clone(),
         },
         transcripts: config.transcripts,
+        service_management: config.service_management,
     });
     let accept_loop = tokio::spawn(async move {
         if let Err(error) = axum::serve(listener, router).await {

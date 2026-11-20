@@ -31,6 +31,7 @@ use crate::protocol::{
     TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
+use crate::remote_management::{ManagementRequest, ServiceManagement};
 use crate::structure_operations;
 use crate::transcript::AgentSessionInfo;
 use crate::transcript_session::TranscriptSession;
@@ -91,6 +92,7 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         push: context.push.clone(),
         uploads: context.files.home.as_deref().map(UploadDirectory::under_home),
         pending_uploads: HashMap::new(),
+        service_management: context.service_management.clone(),
         devices: context.devices.clone(),
     };
     let handler = tokio::spawn(handle_requests(connection, request_queue, context, device_token));
@@ -226,6 +228,7 @@ struct ClientConnection {
     uploads: Option<UploadDirectory>,
     /// 進行中的上傳，以 upload_id(開始請求的 request_id)為 key;連線結束時一併刪掉暫存檔。
     pending_uploads: HashMap<String, PendingUpload>,
+    service_management: Option<ServiceManagement>,
     devices: DeviceStore,
 }
 
@@ -356,6 +359,15 @@ impl ClientConnection {
             ClientMessage::AgentStart(request) => structure_operations::agent_start(&self.herdr, request).await,
             ClientMessage::FileUploadStart(request) => self.upload_start(request, device).await,
             ClientMessage::FileUploadChunk(request) => self.upload_chunk(request, device).await,
+            ClientMessage::HostServiceStatus(request) => self.manage(ManagementRequest::Status(request.request_id)).await,
+            ClientMessage::HostServiceUpdate(request) => self.manage(ManagementRequest::Update(request.request_id)).await,
+            ClientMessage::HostServiceSetAutoUpdate(request) => {
+                self.manage(ManagementRequest::SetAutoUpdate {
+                    request_id: request.request_id,
+                    enabled: request.enabled,
+                })
+                .await
+            }
             ClientMessage::DevicesList(request) => self.devices_list(request.request_id, device).await,
             ClientMessage::DevicesRevoke(request) => self.devices_revoke(request.request_id, request.device_id, device).await,
             ClientMessage::PaneTerminalClose(close) => {
@@ -365,6 +377,13 @@ impl ClientConnection {
             }
         };
         Some(reply)
+    }
+
+    async fn manage(&self, request: ManagementRequest) -> ServerMessage {
+        if !self.handshaken {
+            return error(Some(request.request_id().to_owned()), ErrorCode::HandshakeRequired, "send hello first");
+        }
+        crate::remote_management::reply(self.service_management.clone(), request).await
     }
 
     /// 已配對(未撤銷)的裝置，不含權杖。

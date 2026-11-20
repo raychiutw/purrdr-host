@@ -43,6 +43,8 @@ pub(crate) struct ServiceContext {
     pub files: crate::host_files::FileAccessEnvironment,
     /// 推播外掛代裝(`~/.purrdr/push-*`)。
     pub push: crate::push_plugin::PushPlugin,
+    /// 從 app 管理主機服務;None 時不能管理。
+    pub service_management: Option<crate::remote_management::ServiceManagement>,
 }
 
 impl ServiceContext {

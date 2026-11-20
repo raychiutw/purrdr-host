@@ -13,6 +13,7 @@ use futures_util::{SinkExt, StreamExt};
 use purrdr_host_service::device_store::{DeviceStore, IssuedDevice};
 use purrdr_host_service::herdr_cli::HerdrCli;
 use purrdr_host_service::herdr_socket::{HerdrSocket, Platform};
+use purrdr_host_service::remote_management::ServiceManagement;
 use purrdr_host_service::transcript::TranscriptEnvironment;
 use purrdr_host_service::{Heartbeat, HostServiceConfig, RunningHostService};
 use serde_json::Value;
@@ -388,12 +389,27 @@ pub async fn start_file_service(herdr_socket: HerdrSocket, options: FileServiceO
         options.transcripts,
         options.temporary_directory,
         options.state_directory,
+        None,
     )
     .await
 }
 
 async fn start_service_with(herdr_socket: HerdrSocket, herdr_cli: HerdrCli, heartbeat: Heartbeat, transcripts: TranscriptEnvironment) -> TestHostService {
-    start_service_with_options(herdr_socket, herdr_cli, heartbeat, transcripts, None, None).await
+    start_service_with_options(herdr_socket, herdr_cli, heartbeat, transcripts, None, None, None).await
+}
+
+/// 從 app 管理主機服務的測試：指定安裝位置(暫存家目錄加假系統);None 代表不是安裝好的那份。
+pub async fn start_service_with_management(herdr_socket: HerdrSocket, service_management: Option<ServiceManagement>) -> TestHostService {
+    start_service_with_options(
+        herdr_socket,
+        HerdrCli::search(None),
+        Heartbeat::default(),
+        TranscriptEnvironment::default(),
+        None,
+        None,
+        service_management,
+    )
+    .await
 }
 
 async fn start_service_with_options(
@@ -403,6 +419,7 @@ async fn start_service_with_options(
     transcripts: TranscriptEnvironment,
     temporary_directory: Option<PathBuf>,
     state_directory: Option<PathBuf>,
+    service_management: Option<ServiceManagement>,
 ) -> TestHostService {
     let state_root = tempfile::tempdir().unwrap();
     let state_path = state_directory.unwrap_or_else(|| state_root.path().to_owned());
@@ -414,6 +431,7 @@ async fn start_service_with_options(
         heartbeat,
         transcripts,
         temporary_directory,
+        service_management,
     })
     .await
     .expect("啟動主機服務");

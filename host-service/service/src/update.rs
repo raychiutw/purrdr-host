@@ -215,6 +215,20 @@ pub enum UpdateOutcome {
     UpToDate { installed: Version, latest: Version },
 }
 
+/// 立即更新(`Updater::launch`)的結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateLaunch {
+    /// 已啟動更新程序。
+    Started {
+        from: Version,
+        to: Version,
+    },
+    UpToDate {
+        installed: Version,
+        latest: Version,
+    },
+}
+
 /// 背景自動檢查的結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutomaticOutcome {
@@ -432,6 +446,28 @@ impl<R: ReleaseSource, L: InstallLocation> Updater<R, L> {
             auto_update,
             last_result,
         })
+    }
+
+    /// 上次更新後退回的版本(背景自動更新不再重試它)。
+    pub fn rolled_back_version(&mut self) -> Option<Version> {
+        self.location.rolled_back_version()
+    }
+
+    /// 立即更新(從 app):有更大的版本就啟動更新程序(由它套用)並記下來;已有更新在進行回 `InProgress`。
+    /// 不跳過退回過的版本(同手動 `update`)。
+    pub fn launch(&mut self, launcher: &mut dyn UpdateLauncher) -> Result<UpdateLaunch, UpdateError> {
+        let check = self.check()?;
+        let (installed, latest) = check.versions()?;
+        if !check.update_available() {
+            return Ok(UpdateLaunch::UpToDate { installed, latest });
+        }
+        // 只確認沒有更新在進行;鎖由更新程序自己拿。
+        drop(self.location.lock()?);
+        launcher
+            .launch()
+            .map_err(|message| UpdateError::Io(format!("cannot start the update: {message}")))?;
+        self.record(format!("update to {latest} started"));
+        Ok(UpdateLaunch::Started { from: installed, to: latest })
     }
 
     /// 背景自動檢查：開啟且有新版時啟動更新程序(由它套用);結果都記下來。
