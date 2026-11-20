@@ -346,11 +346,82 @@ fn swift_type(field_type: &FieldType) -> String {
     }
 }
 
+/// Swift 保留字(The Swift Programming Language〈Lexical Structure〉的 Keywords and Punctuation:
+/// 宣告、敘述、運算式與型別的關鍵字;另加點號後是 metatype 語法的 `Type`、`Protocol`)。
+const SWIFT_KEYWORDS: &[&str] = &[
+    // 宣告
+    "associatedtype",
+    "borrowing",
+    "class",
+    "consuming",
+    "deinit",
+    "enum",
+    "extension",
+    "fileprivate",
+    "func",
+    "import",
+    "init",
+    "inout",
+    "internal",
+    "let",
+    "nonisolated",
+    "open",
+    "operator",
+    "precedencegroup",
+    "private",
+    "protocol",
+    "public",
+    "rethrows",
+    "static",
+    "struct",
+    "subscript",
+    "typealias",
+    "var",
+    // 敘述
+    "break",
+    "case",
+    "catch",
+    "continue",
+    "default",
+    "defer",
+    "do",
+    "else",
+    "fallthrough",
+    "for",
+    "guard",
+    "if",
+    "in",
+    "repeat",
+    "return",
+    "throw",
+    "switch",
+    "where",
+    "while",
+    // 運算式與型別
+    "Any",
+    "as",
+    "await",
+    "false",
+    "is",
+    "nil",
+    "self",
+    "Self",
+    "super",
+    "throws",
+    "true",
+    "try",
+    // 點號後是 metatype 語法
+    "Type",
+    "Protocol",
+];
+
+/// 名稱是 Swift 保留字時加反引號。
 fn swift_identifier(name: &str) -> String {
-    const KEYWORDS: [&str; 12] = [
-        "default", "case", "class", "enum", "func", "import", "in", "let", "protocol", "self", "struct", "var",
-    ];
-    if KEYWORDS.contains(&name) { format!("`{name}`") } else { name.to_owned() }
+    if SWIFT_KEYWORDS.contains(&name) {
+        format!("`{name}`")
+    } else {
+        name.to_owned()
+    }
 }
 
 fn swift_definition(definition: &Definition) -> String {
@@ -373,7 +444,10 @@ fn swift_definition(definition: &Definition) -> String {
             output += "            let type = try container.decode(String.self, forKey: .type)\n";
             output += "            switch type {\n";
             for (tag, target) in variants {
-                output += &format!("            case \"{tag}\": self = .{}(try {target}(from: decoder))\n", camel_case(target));
+                output += &format!(
+                    "            case \"{tag}\": self = .{}(try {target}(from: decoder))\n",
+                    swift_identifier(&camel_case(target))
+                );
             }
             output += "            default:\n";
             output +=
@@ -383,7 +457,7 @@ fn swift_definition(definition: &Definition) -> String {
             output += "            var container = encoder.container(keyedBy: TypeKey.self)\n";
             output += "            switch self {\n";
             for (tag, target) in variants {
-                output += &format!("            case .{}(let message):\n", camel_case(target));
+                output += &format!("            case .{}(let message):\n", swift_identifier(&camel_case(target)));
                 output += &format!("                try container.encode(\"{tag}\", forKey: .type)\n");
                 output += "                try message.encode(to: encoder)\n";
             }
@@ -391,7 +465,10 @@ fn swift_definition(definition: &Definition) -> String {
             if !write_variants.is_empty() {
                 output += "\n        /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。\n";
                 output += "        public var isWrite: Bool {\n            switch self {\n";
-                let cases: Vec<String> = write_variants.iter().map(|target| format!(".{}", camel_case(target))).collect();
+                let cases: Vec<String> = write_variants
+                    .iter()
+                    .map(|target| format!(".{}", swift_identifier(&camel_case(target))))
+                    .collect();
                 output += &format!("            case {}: return true\n", cases.join(", "));
                 if write_variants.len() < variants.len() {
                     output += "            default: return false\n";
@@ -438,8 +515,8 @@ fn swift_definition(definition: &Definition) -> String {
                 .collect();
             output += &format!("\n        public init({}) {{\n", parameters.join(", "));
             for field in fields {
-                let property = camel_case(&field.json_name);
-                output += &format!("            self.{property} = {}\n", swift_identifier(&property));
+                let property = swift_identifier(&camel_case(&field.json_name));
+                output += &format!("            self.{property} = {property}\n");
             }
             output += "        }\n";
             if !fields.is_empty() {
