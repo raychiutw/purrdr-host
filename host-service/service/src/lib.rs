@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub mod agent_activity;
 pub mod audit_log;
 pub mod auto_update;
 mod connection;
