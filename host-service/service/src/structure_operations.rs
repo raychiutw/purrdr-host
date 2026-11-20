@@ -9,12 +9,12 @@ use crate::connection::{error, herdr_error};
 use crate::herdr_client::HerdrClient;
 use crate::http::blocking;
 use crate::pane_terminal;
+use crate::protocol::{
+    AgentStart, AgentStartResult, ErrorCode, ResumableAgentKind, ServerMessage, WorkspaceClose, WorkspaceCloseResult, WorkspaceCreate, WorkspaceCreateResult,
+    WorkspaceRename, WorkspaceRenameResult, WorktreeCreate, WorktreeCreateResult,
+};
 use crate::session_history;
 use crate::transcript::TranscriptEnvironment;
-use crate::protocol::{
-    AgentStart, AgentStartResult, ErrorCode, ResumableAgentKind, ServerMessage, WorkspaceClose, WorkspaceCloseResult, WorkspaceCreate, WorkspaceCreateResult, WorkspaceRename,
-    WorkspaceRenameResult, WorktreeCreate, WorktreeCreateResult,
-};
 
 /// 建立 workspace 或 worktree 時 herdr 可能要等 shell 與 git;比 app 的 60 秒期限短，app 放棄前先收到結果或錯誤。
 const CREATION_WAIT: Duration = Duration::from_secs(50);
@@ -120,7 +120,11 @@ pub async fn agent_start(herdr: &HerdrClient, request: AgentStart, transcripts: 
     if let Some((kind, session)) = resume.clone() {
         let environment = transcripts.clone();
         if !blocking(move || session_history::exists(&environment, kind, &session)).await {
-            return error(Some(request.request_id), ErrorCode::TranscriptAbsent, "no transcript for resume_session on this host");
+            return error(
+                Some(request.request_id),
+                ErrorCode::TranscriptAbsent,
+                "no transcript for resume_session on this host",
+            );
         }
     }
     let mut params = json!({"name": request.name, "kind": request.kind, "pane_id": request.pane_id});

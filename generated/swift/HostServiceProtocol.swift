@@ -61,6 +61,10 @@ extension HostServiceProtocol {
         case sessionsList(SessionsList)
         case gitStatus(GitStatus)
         case gitDiff(GitDiff)
+        case queueList(QueueList)
+        case queueAdd(QueueAdd)
+        case queueRemove(QueueRemove)
+        case queueReorder(QueueReorder)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -112,6 +116,10 @@ extension HostServiceProtocol {
             case "sessions.list": self = .sessionsList(try SessionsList(from: decoder))
             case "git.status": self = .gitStatus(try GitStatus(from: decoder))
             case "git.diff": self = .gitDiff(try GitDiff(from: decoder))
+            case "queue.list": self = .queueList(try QueueList(from: decoder))
+            case "queue.add": self = .queueAdd(try QueueAdd(from: decoder))
+            case "queue.remove": self = .queueRemove(try QueueRemove(from: decoder))
+            case "queue.reorder": self = .queueReorder(try QueueReorder(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -246,13 +254,25 @@ extension HostServiceProtocol {
             case .gitDiff(let message):
                 try container.encode("git.diff", forKey: .type)
                 try message.encode(to: encoder)
+            case .queueList(let message):
+                try container.encode("queue.list", forKey: .type)
+                try message.encode(to: encoder)
+            case .queueAdd(let message):
+                try container.encode("queue.add", forKey: .type)
+                try message.encode(to: encoder)
+            case .queueRemove(let message):
+                try container.encode("queue.remove", forKey: .type)
+                try message.encode(to: encoder)
+            case .queueReorder(let message):
+                try container.encode("queue.reorder", forKey: .type)
+                try message.encode(to: encoder)
             }
         }
 
         /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
         public var isWrite: Bool {
             switch self {
-            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove, .pushUpdateMuted, .workspaceCreate, .workspaceRename, .workspaceClose, .worktreeCreate, .agentStart, .fileUploadStart, .fileUploadChunk, .devicesRevoke, .hostServiceUpdate, .hostServiceSetAutoUpdate: return true
+            case .paneSendKeys, .paneSendText, .agentPrompt, .paneTerminalInput, .paneTerminalResize, .paneTerminalScroll, .pushInstall, .pushRemove, .pushUpdateMuted, .workspaceCreate, .workspaceRename, .workspaceClose, .worktreeCreate, .agentStart, .fileUploadStart, .fileUploadChunk, .devicesRevoke, .hostServiceUpdate, .hostServiceSetAutoUpdate, .queueAdd, .queueRemove, .queueReorder: return true
             default: return false
             }
         }
@@ -306,6 +326,11 @@ extension HostServiceProtocol {
         case sessionsListResult(SessionsListResult)
         case gitStatusResult(GitStatusResult)
         case gitDiffResult(GitDiffResult)
+        case queueListResult(QueueListResult)
+        case queueAddResult(QueueAddResult)
+        case queueRemoveResult(QueueRemoveResult)
+        case queueReorderResult(QueueReorderResult)
+        case queueChanged(QueueChanged)
 
         private enum TypeKey: String, CodingKey {
             case type
@@ -359,6 +384,11 @@ extension HostServiceProtocol {
             case "sessions.list.result": self = .sessionsListResult(try SessionsListResult(from: decoder))
             case "git.status.result": self = .gitStatusResult(try GitStatusResult(from: decoder))
             case "git.diff.result": self = .gitDiffResult(try GitDiffResult(from: decoder))
+            case "queue.list.result": self = .queueListResult(try QueueListResult(from: decoder))
+            case "queue.add.result": self = .queueAddResult(try QueueAddResult(from: decoder))
+            case "queue.remove.result": self = .queueRemoveResult(try QueueRemoveResult(from: decoder))
+            case "queue.reorder.result": self = .queueReorderResult(try QueueReorderResult(from: decoder))
+            case "queue.changed": self = .queueChanged(try QueueChanged(from: decoder))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "unknown message type \(type)")
             }
@@ -498,6 +528,21 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .gitDiffResult(let message):
                 try container.encode("git.diff.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .queueListResult(let message):
+                try container.encode("queue.list.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .queueAddResult(let message):
+                try container.encode("queue.add.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .queueRemoveResult(let message):
+                try container.encode("queue.remove.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .queueReorderResult(let message):
+                try container.encode("queue.reorder.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .queueChanged(let message):
+                try container.encode("queue.changed", forKey: .type)
                 try message.encode(to: encoder)
             }
         }
@@ -2074,6 +2119,223 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
+    /// Send When Done 佇列(raychiutw/purrdr.host#30):主機服務的 Agent 觀察者在 Agent 從 working 變成 idle／done 時送出佇列的第一則(經 expected_session 比對)。帶 pane_id 時只回這個 pane。
+    public struct QueueList: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var paneId: String?
+
+        public init(requestId: String, paneId: String? = nil) {
+            self.requestId = requestId
+            self.paneId = paneId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case paneId = "pane_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 有排隊訊息的 pane 的佇列。
+    public struct QueueListResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var queues: [PaneQueue]
+
+        public init(requestId: String, queues: [PaneQueue]) {
+            self.requestId = requestId
+            self.queues = queues
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case queues
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 一個 pane 的佇列，依送出順序。
+    public struct PaneQueue: Codable, Sendable, Equatable {
+        public var paneId: String
+        public var items: [QueuedPrompt]
+        public var paused: QueuePause?
+
+        public init(paneId: String, items: [QueuedPrompt], paused: QueuePause? = nil) {
+            self.paneId = paneId
+            self.items = items
+            self.paused = paused
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case paneId = "pane_id"
+            case items
+            case paused
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 排隊的一則訊息。
+    public struct QueuedPrompt: Codable, Sendable, Equatable {
+        public var itemId: String
+        public var text: String
+        public var expectedSession: String?
+
+        public init(itemId: String, text: String, expectedSession: String? = nil) {
+            self.itemId = itemId
+            self.text = text
+            self.expectedSession = expectedSession
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case itemId = "item_id"
+            case text
+            case expectedSession = "expected_session"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 佇列暫停的原因。session_changed:要送出時 pane 的 Agent session 已不是 expected_session,沒有送出;對這個 pane 的佇列做 add／remove／reorder 後解除，下次 Agent 做完再試。
+    public enum QueuePause: String, Codable, Sendable, CaseIterable {
+        case sessionChanged = "session_changed"
+    }
+}
+
+extension HostServiceProtocol {
+    /// 排一則訊息到 pane 的佇列尾端。每個 pane 最多 20 則(超過回 queue_full),每則最多 64 KiB(UTF-8)。佇列存在狀態資料夾，主機服務重啟後還在;稽核不記內容。
+    public struct QueueAdd: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var paneId: String
+        public var text: String
+        public var expectedSession: String?
+
+        public init(requestId: String, paneId: String, text: String, expectedSession: String? = nil) {
+            self.requestId = requestId
+            self.paneId = paneId
+            self.text = text
+            self.expectedSession = expectedSession
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case paneId = "pane_id"
+            case text
+            case expectedSession = "expected_session"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 已排入佇列。
+    public struct QueueAddResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var itemId: String
+
+        public init(requestId: String, itemId: String) {
+            self.requestId = requestId
+            self.itemId = itemId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case itemId = "item_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 從佇列刪除一則;不在佇列裡回 queue_item_unknown。
+    public struct QueueRemove: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var paneId: String
+        public var itemId: String
+
+        public init(requestId: String, paneId: String, itemId: String) {
+            self.requestId = requestId
+            self.paneId = paneId
+            self.itemId = itemId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case paneId = "pane_id"
+            case itemId = "item_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 已刪除。
+    public struct QueueRemoveResult: Codable, Sendable, Equatable {
+        public var requestId: String
+
+        public init(requestId: String) {
+            self.requestId = requestId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 重排佇列:item_ids 必須恰好是目前佇列的所有 item_id(換順序);否則回 queue_item_unknown。
+    public struct QueueReorder: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var paneId: String
+        public var itemIds: [String]
+
+        public init(requestId: String, paneId: String, itemIds: [String]) {
+            self.requestId = requestId
+            self.paneId = paneId
+            self.itemIds = itemIds
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case paneId = "pane_id"
+            case itemIds = "item_ids"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 已重排。
+    public struct QueueReorderResult: Codable, Sendable, Equatable {
+        public var requestId: String
+
+        public init(requestId: String) {
+            self.requestId = requestId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 某個 pane 的佇列變了(新增、刪除、重排、送出或暫停),推給所有連線。sent_item_id:這次變更是因為這則已送出。
+    public struct QueueChanged: Codable, Sendable, Equatable {
+        public var queue: PaneQueue
+        public var sentItemId: String?
+
+        public init(queue: PaneQueue, sentItemId: String? = nil) {
+            self.queue = queue
+            self.sentItemId = sentItemId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case queue
+            case sentItemId = "sent_item_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
     /// 一個過去的 session。
     public struct HistorySession: Codable, Sendable, Equatable {
         /// session id,可直接當 agent.start 的 resume_session。
@@ -2982,7 +3244,7 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;queue_full:這個 pane 的 Send When Done 佇列已有 20 則;queue_item_unknown:queue.remove／queue.reorder 的 item_id 不在佇列裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
     public enum ErrorCode: String, Codable, Sendable, CaseIterable {
         case invalidMessage = "invalid_message"
         case handshakeRequired = "handshake_required"
@@ -3012,6 +3274,8 @@ extension HostServiceProtocol {
         case paneChanged = "pane_changed"
         case cwdNotAllowed = "cwd_not_allowed"
         case notGitRepository = "not_git_repository"
+        case queueFull = "queue_full"
+        case queueItemUnknown = "queue_item_unknown"
         case internalError = "internal_error"
     }
 }

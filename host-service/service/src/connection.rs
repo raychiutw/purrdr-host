@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::agent_observer::{AgentObserver, MAXIMUM_PROMPT_BYTES, QueueFailure};
 use crate::audit_log::{AuditEvent, AuditLog, RevokedBy};
 use crate::device_store::{Device, DeviceStore, RevokeFailure};
 use crate::git_changes::{self, GitFailure};
@@ -29,15 +30,16 @@ use crate::pane_terminal::{self, PaneTerminal};
 use crate::protocol::{
     Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, DevicesListResult, DevicesRevokeResult, ErrorCode,
     ErrorMessage, EventsEnded, EventsSubscribe, EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus,
-    FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, HerdrServer, PROTOCOL_VERSION, PairedDevice, PaneSendKeys,
-    PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, ServerMessage, SubscribedEvent, TerminalScrollDirection,
-    GitDiff, GitDiffResult, GitStatus, GitStatusResult, SessionsList, SessionsListResult, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
+    FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, GitDiff, GitDiffResult, GitStatus, GitStatusResult, HerdrServer,
+    PROTOCOL_VERSION, PairedDevice, PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, QueueAdd,
+    QueueAddResult, QueueList, QueueListResult, QueueRemove, QueueRemoveResult, QueueReorder, QueueReorderResult, ServerMessage, SessionsList,
+    SessionsListResult, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
 use crate::remote_management::{self, ServiceManagement};
+use crate::session_history;
 use crate::structure_operations;
 use crate::text_format::rfc3339;
-use crate::session_history;
 use crate::transcript::{AgentSessionInfo, TranscriptEnvironment};
 use crate::transcript_session::TranscriptSession;
 use crate::uploads::{ChunkOutcome, PendingUpload, UploadDirectory, UploadFailure};
@@ -100,6 +102,11 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         pending_uploads: HashMap::new(),
         service_management: context.service_management.clone(),
         devices: context.devices.clone(),
+        observer: context.observer.clone(),
+        queue_changes: context
+            .observer
+            .as_ref()
+            .map(|observer| forward_queue_changes(observer.subscribe(), outbound.clone())),
     };
     let handler = tokio::spawn(handle_requests(connection, request_queue, context, device_token));
     // 逾時沒收到任何 frame(含 pong)就當作 app 已經不在。
@@ -263,12 +270,19 @@ struct ClientConnection {
     pending_uploads: HashMap<String, PendingUpload>,
     service_management: Option<ServiceManagement>,
     devices: DeviceStore,
+    /// Send When Done 佇列;觀察者沒啟動時 None。
+    observer: Option<AgentObserver>,
+    /// 把 queue.changed 轉給這條連線的 task。
+    queue_changes: Option<JoinHandle<()>>,
 }
 
 impl Drop for ClientConnection {
     fn drop(&mut self) {
         for forwarding in self.subscriptions.values() {
             forwarding.abort();
+        }
+        if let Some(queue_changes) = &self.queue_changes {
+            queue_changes.abort();
         }
     }
 }
@@ -333,6 +347,10 @@ impl ClientConnection {
             ClientMessage::SessionsList(request) => self.sessions_list(request).await,
             ClientMessage::GitStatus(request) => self.git_status(request).await,
             ClientMessage::GitDiff(request) => self.git_diff(request).await,
+            ClientMessage::QueueList(request) => self.queue_list(request),
+            ClientMessage::QueueAdd(request) => self.queue_add(request),
+            ClientMessage::QueueRemove(request) => self.queue_remove(request),
+            ClientMessage::QueueReorder(request) => self.queue_reorder(request),
             ClientMessage::AgentPrompt(request) => self.agent_prompt(request).await,
             ClientMessage::EventsSubscribe(request) => self.events_subscribe(request).await,
             ClientMessage::EventsUnsubscribe(request) => {
@@ -509,6 +527,60 @@ impl ClientConnection {
         })
     }
 
+    fn queue_list(&self, request: QueueList) -> ServerMessage {
+        let Some(observer) = &self.observer else {
+            return observer_missing(request.request_id);
+        };
+        ServerMessage::QueueListResult(QueueListResult {
+            queues: observer.list(request.pane_id.as_deref()),
+            request_id: request.request_id,
+        })
+    }
+
+    fn queue_add(&self, request: QueueAdd) -> ServerMessage {
+        let Some(observer) = &self.observer else {
+            return observer_missing(request.request_id);
+        };
+        if !pane_terminal::is_valid_target(&request.pane_id) || request.text.len() > MAXIMUM_PROMPT_BYTES {
+            return error(
+                Some(request.request_id),
+                ErrorCode::InvalidMessage,
+                "invalid pane_id or text larger than 64 KiB",
+            );
+        }
+        match observer.add(&request.pane_id, request.text, request.expected_session) {
+            Ok(item_id) => ServerMessage::QueueAddResult(QueueAddResult {
+                request_id: request.request_id,
+                item_id,
+            }),
+            Err(failure) => queue_error(request.request_id, failure),
+        }
+    }
+
+    fn queue_remove(&self, request: QueueRemove) -> ServerMessage {
+        let Some(observer) = &self.observer else {
+            return observer_missing(request.request_id);
+        };
+        match observer.remove(&request.pane_id, &request.item_id) {
+            Ok(()) => ServerMessage::QueueRemoveResult(QueueRemoveResult {
+                request_id: request.request_id,
+            }),
+            Err(failure) => queue_error(request.request_id, failure),
+        }
+    }
+
+    fn queue_reorder(&self, request: QueueReorder) -> ServerMessage {
+        let Some(observer) = &self.observer else {
+            return observer_missing(request.request_id);
+        };
+        match observer.reorder(&request.pane_id, &request.item_ids) {
+            Ok(()) => ServerMessage::QueueReorderResult(QueueReorderResult {
+                request_id: request.request_id,
+            }),
+            Err(failure) => queue_error(request.request_id, failure),
+        }
+    }
+
     /// 工作資料夾過去的 session(在 blocking 執行緒讀檔)。
     async fn sessions_list(&self, request: SessionsList) -> ServerMessage {
         if !std::path::Path::new(&request.cwd).is_absolute() {
@@ -532,7 +604,11 @@ impl ClientConnection {
         if snapshot.agents.iter().any(|agent| agent.cwd.as_deref() == Some(cwd)) {
             Ok(PathBuf::from(cwd))
         } else {
-            Err(error(Some(request_id.to_owned()), ErrorCode::CwdNotAllowed, "cwd is not the working directory of an agent herdr reports"))
+            Err(error(
+                Some(request_id.to_owned()),
+                ErrorCode::CwdNotAllowed,
+                "cwd is not the working directory of an agent herdr reports",
+            ))
         }
     }
 
@@ -568,7 +644,14 @@ impl ClientConnection {
     }
 
     async fn pane_send_text(&self, request: PaneSendText) -> ServerMessage {
-        if let Err(failure) = pane_guard::check(&self.herdr, &request.pane_id, request.expected_session.as_deref(), request.expected_screen.as_deref()).await {
+        if let Err(failure) = pane_guard::check(
+            &self.herdr,
+            &request.pane_id,
+            request.expected_session.as_deref(),
+            request.expected_screen.as_deref(),
+        )
+        .await
+        {
             return guard_error(request.request_id, failure);
         }
         let params = json!({"pane_id": request.pane_id, "text": request.text});
@@ -581,7 +664,14 @@ impl ClientConnection {
     }
 
     async fn agent_prompt(&self, request: AgentPrompt) -> ServerMessage {
-        if let Err(failure) = pane_guard::check(&self.herdr, &request.pane_id, request.expected_session.as_deref(), request.expected_screen.as_deref()).await {
+        if let Err(failure) = pane_guard::check(
+            &self.herdr,
+            &request.pane_id,
+            request.expected_session.as_deref(),
+            request.expected_screen.as_deref(),
+        )
+        .await
+        {
             return guard_error(request.request_id, failure);
         }
         let mut params = json!({"target": request.pane_id, "text": request.text});
@@ -881,7 +971,14 @@ impl ClientConnection {
     }
 
     async fn pane_send_keys(&self, request: PaneSendKeys) -> ServerMessage {
-        if let Err(failure) = pane_guard::check(&self.herdr, &request.pane_id, request.expected_session.as_deref(), request.expected_screen.as_deref()).await {
+        if let Err(failure) = pane_guard::check(
+            &self.herdr,
+            &request.pane_id,
+            request.expected_session.as_deref(),
+            request.expected_screen.as_deref(),
+        )
+        .await
+        {
             return guard_error(request.request_id, failure);
         }
         let params = json!({"pane_id": request.pane_id, "keys": request.keys});
@@ -1056,6 +1153,35 @@ pub(crate) fn guard_error(request_id: String, failure: GuardFailure) -> ServerMe
     match failure {
         GuardFailure::Changed(message) => error(Some(request_id), ErrorCode::PaneChanged, &message),
         GuardFailure::Herdr { method, failure } => herdr_error(request_id, method, failure),
+    }
+}
+
+/// 佇列變更推給這條連線(跟不上而漏掉的就略過，app 可再 queue.list)。
+fn forward_queue_changes(mut changes: tokio::sync::broadcast::Receiver<ServerMessage>, outbound: mpsc::UnboundedSender<Outbound>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match changes.recv().await {
+                Ok(change) => {
+                    if outbound.send(Outbound::Message(change)).is_err() {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    })
+}
+
+fn observer_missing(request_id: String) -> ServerMessage {
+    error(Some(request_id), ErrorCode::InternalError, "the agent observer is not running")
+}
+
+fn queue_error(request_id: String, failure: QueueFailure) -> ServerMessage {
+    match failure {
+        QueueFailure::Full => error(Some(request_id), ErrorCode::QueueFull, "this pane already has 20 queued prompts"),
+        QueueFailure::UnknownItem => error(Some(request_id), ErrorCode::QueueItemUnknown, "item_id is not in this queue"),
+        QueueFailure::Storage(message) => error(Some(request_id), ErrorCode::InternalError, &message),
     }
 }
 

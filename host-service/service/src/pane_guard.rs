@@ -20,26 +20,18 @@ pub(crate) enum GuardFailure {
 
 /// 這個 pane 目前的 Agent session id;pane 上沒有 Agent 或沒有回報 session 時 None。
 pub(crate) fn session_of(snapshot: &Value, pane_id: &str) -> Option<String> {
-    snapshot["snapshot"]["agents"]
-        .as_array()?
-        .iter()
-        .find(|agent| agent["pane_id"] == pane_id)?["agent_session"]["value"]
+    snapshot["snapshot"]["agents"].as_array()?.iter().find(|agent| agent["pane_id"] == pane_id)?["agent_session"]["value"]
         .as_str()
         .map(str::to_owned)
 }
 
 /// 依序比對 session 與畫面;全部符合(或沒帶)時 Ok。
-pub(crate) async fn check(
-    herdr: &HerdrClient,
-    pane_id: &str,
-    expected_session: Option<&str>,
-    expected_screen: Option<&str>,
-) -> Result<(), GuardFailure> {
+pub(crate) async fn check(herdr: &HerdrClient, pane_id: &str, expected_session: Option<&str>, expected_screen: Option<&str>) -> Result<(), GuardFailure> {
     if let Some(expected) = expected_session {
-        let snapshot = herdr
-            .request("session.snapshot", json!({}))
-            .await
-            .map_err(|failure| GuardFailure::Herdr { method: "session.snapshot", failure })?;
+        let snapshot = herdr.request("session.snapshot", json!({})).await.map_err(|failure| GuardFailure::Herdr {
+            method: "session.snapshot",
+            failure,
+        })?;
         if session_of(&snapshot, pane_id).as_deref() != Some(expected) {
             return Err(GuardFailure::Changed(format!("pane {pane_id} is no longer session {expected}")));
         }

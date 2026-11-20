@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use futures_util::{SinkExt, StreamExt};
+use purrdr_host_service::agent_observer::ObserverOptions;
 use purrdr_host_service::device_store::{DeviceStore, IssuedDevice};
 use purrdr_host_service::herdr_cli::HerdrCli;
 use purrdr_host_service::herdr_socket::{HerdrSocket, Platform};
@@ -390,12 +391,13 @@ pub async fn start_file_service(herdr_socket: HerdrSocket, options: FileServiceO
         options.temporary_directory,
         options.state_directory,
         None,
+        None,
     )
     .await
 }
 
 async fn start_service_with(herdr_socket: HerdrSocket, herdr_cli: HerdrCli, heartbeat: Heartbeat, transcripts: TranscriptEnvironment) -> TestHostService {
-    start_service_with_options(herdr_socket, herdr_cli, heartbeat, transcripts, None, None, None).await
+    start_service_with_options(herdr_socket, herdr_cli, heartbeat, transcripts, None, None, None, None).await
 }
 
 /// 從 app 管理主機服務的測試：指定安裝位置(暫存家目錄加假系統);None 代表不是安裝好的那份。
@@ -408,6 +410,7 @@ pub async fn start_service_with_management(herdr_socket: HerdrSocket, service_ma
         None,
         None,
         service_management,
+        None,
     )
     .await
 }
@@ -420,6 +423,7 @@ async fn start_service_with_options(
     temporary_directory: Option<PathBuf>,
     state_directory: Option<PathBuf>,
     service_management: Option<ServiceManagement>,
+    observer: Option<ObserverOptions>,
 ) -> TestHostService {
     let state_root = tempfile::tempdir().unwrap();
     let state_path = state_directory.unwrap_or_else(|| state_root.path().to_owned());
@@ -432,6 +436,7 @@ async fn start_service_with_options(
         transcripts,
         temporary_directory,
         service_management,
+        observer,
     })
     .await
     .expect("啟動主機服務");
@@ -472,4 +477,19 @@ pub async fn http_request(service: &TestHostService, method: &str, path: &str, d
         serde_json::from_str(body).unwrap_or(Value::String(body.to_owned()))
     };
     (status, body)
+}
+
+/// 同 `start_service`,另外啟動常駐的 Agent 觀察者;`state_directory` 給定時用它(重啟測試)。
+pub async fn start_service_with_observer(herdr_socket: HerdrSocket, state_directory: Option<PathBuf>, observer: ObserverOptions) -> TestHostService {
+    start_service_with_options(
+        herdr_socket,
+        HerdrCli::search(None),
+        Heartbeat::default(),
+        TranscriptEnvironment::default(),
+        None,
+        state_directory,
+        None,
+        Some(observer),
+    )
+    .await
 }

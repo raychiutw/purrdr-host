@@ -56,7 +56,8 @@ fn garden_repository() -> TempDir {
         email: BStr::new("demo@example.com"),
         time: "1763600000 +0000",
     };
-    repo.commit_as(signature, signature, "HEAD", "garden journal", head_tree, None::<gix::ObjectId>).unwrap();
+    repo.commit_as(signature, signature, "HEAD", "garden journal", head_tree, None::<gix::ObjectId>)
+        .unwrap();
     let mut index_files = head_files.clone();
     index_files.push(("TODO.md", b"- water the basil\n"));
     let index_tree = repo.write_object(entries(&index_files)).unwrap().detach();
@@ -86,7 +87,11 @@ fn snapshot_with_agent_in(cwd: &Path) -> Value {
 }
 
 async fn connected(cwd_reported_by_herdr: &Path) -> (FakeHerdr, TestHostService, TestClient) {
-    let herdr = FakeHerdr::start(vec![("ping", recorded("ping.ndjson")), ("session.snapshot", snapshot_with_agent_in(cwd_reported_by_herdr))]).await;
+    let herdr = FakeHerdr::start(vec![
+        ("ping", recorded("ping.ndjson")),
+        ("session.snapshot", snapshot_with_agent_in(cwd_reported_by_herdr)),
+    ])
+    .await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
@@ -98,7 +103,9 @@ async fn status_lists_changes_against_head_and_skips_ignored_files() {
     let repository = garden_repository();
     let (_herdr, _service, mut client) = connected(repository.path()).await;
 
-    let reply = client.request(json!({"type": "git.status", "request_id": "r2", "cwd": path_text(repository.path())})).await;
+    let reply = client
+        .request(json!({"type": "git.status", "request_id": "r2", "cwd": path_text(repository.path())}))
+        .await;
 
     assert_eq!(
         reply,
@@ -123,11 +130,19 @@ async fn diff_shows_text_hunks_and_withholds_binary_and_excluded_files() {
     let repository = garden_repository();
     let (_herdr, _service, mut client) = connected(repository.path()).await;
 
-    let reply = client.request(json!({"type": "git.diff", "request_id": "r2", "cwd": path_text(repository.path())})).await;
+    let reply = client
+        .request(json!({"type": "git.diff", "request_id": "r2", "cwd": path_text(repository.path())}))
+        .await;
 
     assert_eq!(reply["truncated"], false);
     let files = reply["files"].as_array().unwrap();
-    let file = |path: &str| files.iter().find(|file| file["path"] == path).unwrap_or_else(|| panic!("沒有 {path}:{reply}")).clone();
+    let file = |path: &str| {
+        files
+            .iter()
+            .find(|file| file["path"] == path)
+            .unwrap_or_else(|| panic!("沒有 {path}:{reply}"))
+            .clone()
+    };
     // git diff 的 hunk 格式(前後 3 行)。
     assert_eq!(
         file("README.md"),
@@ -152,7 +167,10 @@ async fn diff_of_one_path_returns_only_that_file() {
         .request(json!({"type": "git.diff", "request_id": "r3", "cwd": path_text(repository.path()), "path": ".gitignore"}))
         .await;
 
-    assert_eq!(reply["files"], json!([{"path": "TODO.md", "change": "added", "diff": "@@ -0,0 +1 @@\n+- water the basil\n"}]));
+    assert_eq!(
+        reply["files"],
+        json!([{"path": "TODO.md", "change": "added", "diff": "@@ -0,0 +1 @@\n+- water the basil\n"}])
+    );
     assert_eq!(unchanged["files"], json!([]));
 }
 
@@ -191,7 +209,9 @@ async fn a_working_directory_outside_a_repository_says_so() {
     let plain = TempDir::new().unwrap();
     let (_herdr, _service, mut client) = connected(plain.path()).await;
 
-    let reply = client.request(json!({"type": "git.status", "request_id": "r2", "cwd": path_text(plain.path())})).await;
+    let reply = client
+        .request(json!({"type": "git.status", "request_id": "r2", "cwd": path_text(plain.path())}))
+        .await;
 
     assert_eq!(reply["code"], "not_git_repository");
 }

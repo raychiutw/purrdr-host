@@ -711,7 +711,11 @@ fn joined(base: &Path, components: &[&str]) -> PathBuf {
 
 /// `${CLAUDE_CONFIG_DIR:-~/.claude}/projects`。
 pub(crate) fn claude_projects(environment: &TranscriptEnvironment) -> PathBuf {
-    environment.claude_config_dir.clone().unwrap_or_else(|| home_relative(environment, &[".claude"])).join("projects")
+    environment
+        .claude_config_dir
+        .clone()
+        .unwrap_or_else(|| home_relative(environment, &[".claude"]))
+        .join("projects")
 }
 
 /// `${CODEX_HOME:-~/.codex}`。

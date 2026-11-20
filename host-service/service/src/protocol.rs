@@ -105,12 +105,20 @@ pub enum ClientMessage {
     GitStatus(GitStatus),
     #[serde(rename = "git.diff")]
     GitDiff(GitDiff),
+    #[serde(rename = "queue.list")]
+    QueueList(QueueList),
+    #[serde(rename = "queue.add")]
+    QueueAdd(QueueAdd),
+    #[serde(rename = "queue.remove")]
+    QueueRemove(QueueRemove),
+    #[serde(rename = "queue.reorder")]
+    QueueReorder(QueueReorder),
 }
 
 impl ClientMessage {
     /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
     pub fn is_write(&self) -> bool {
-        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_))
+        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_) | ClientMessage::QueueAdd(_) | ClientMessage::QueueRemove(_) | ClientMessage::QueueReorder(_))
     }
 }
 
@@ -206,6 +214,16 @@ pub enum ServerMessage {
     GitStatusResult(GitStatusResult),
     #[serde(rename = "git.diff.result")]
     GitDiffResult(GitDiffResult),
+    #[serde(rename = "queue.list.result")]
+    QueueListResult(QueueListResult),
+    #[serde(rename = "queue.add.result")]
+    QueueAddResult(QueueAddResult),
+    #[serde(rename = "queue.remove.result")]
+    QueueRemoveResult(QueueRemoveResult),
+    #[serde(rename = "queue.reorder.result")]
+    QueueReorderResult(QueueReorderResult),
+    #[serde(rename = "queue.changed")]
+    QueueChanged(QueueChanged),
 }
 
 /// 握手：連線後第一個請求，帶 app 使用的協定版本。
@@ -974,6 +992,99 @@ pub enum GitDiffOmitted {
     Excluded,
 }
 
+/// Send When Done 佇列(raychiutw/purrdr.host#30):主機服務的 Agent 觀察者在 Agent 從 working 變成 idle／done 時送出佇列的第一則(經 expected_session 比對)。帶 pane_id 時只回這個 pane。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueList {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+}
+
+/// 有排隊訊息的 pane 的佇列。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueListResult {
+    pub request_id: String,
+    pub queues: Vec<PaneQueue>,
+}
+
+/// 一個 pane 的佇列，依送出順序。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneQueue {
+    pub pane_id: String,
+    pub items: Vec<QueuedPrompt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<QueuePause>,
+}
+
+/// 排隊的一則訊息。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedPrompt {
+    pub item_id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_session: Option<String>,
+}
+
+/// 佇列暫停的原因。session_changed:要送出時 pane 的 Agent session 已不是 expected_session,沒有送出;對這個 pane 的佇列做 add／remove／reorder 後解除，下次 Agent 做完再試。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum QueuePause {
+    #[serde(rename = "session_changed")]
+    SessionChanged,
+}
+
+/// 排一則訊息到 pane 的佇列尾端。每個 pane 最多 20 則(超過回 queue_full),每則最多 64 KiB(UTF-8)。佇列存在狀態資料夾，主機服務重啟後還在;稽核不記內容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueAdd {
+    pub request_id: String,
+    pub pane_id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_session: Option<String>,
+}
+
+/// 已排入佇列。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueAddResult {
+    pub request_id: String,
+    pub item_id: String,
+}
+
+/// 從佇列刪除一則;不在佇列裡回 queue_item_unknown。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueRemove {
+    pub request_id: String,
+    pub pane_id: String,
+    pub item_id: String,
+}
+
+/// 已刪除。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueRemoveResult {
+    pub request_id: String,
+}
+
+/// 重排佇列:item_ids 必須恰好是目前佇列的所有 item_id(換順序);否則回 queue_item_unknown。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueReorder {
+    pub request_id: String,
+    pub pane_id: String,
+    pub item_ids: Vec<String>,
+}
+
+/// 已重排。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueReorderResult {
+    pub request_id: String,
+}
+
+/// 某個 pane 的佇列變了(新增、刪除、重排、送出或暫停),推給所有連線。sent_item_id:這次變更是因為這則已送出。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueChanged {
+    pub queue: PaneQueue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_item_id: Option<String>,
+}
+
 /// 一個過去的 session。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySession {
@@ -1389,7 +1500,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;queue_full:這個 pane 的 Send When Done 佇列已有 20 則;queue_item_unknown:queue.remove／queue.reorder 的 item_id 不在佇列裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
@@ -1448,6 +1559,10 @@ pub enum ErrorCode {
     CwdNotAllowed,
     #[serde(rename = "not_git_repository")]
     NotGitRepository,
+    #[serde(rename = "queue_full")]
+    QueueFull,
+    #[serde(rename = "queue_item_unknown")]
+    QueueItemUnknown,
     #[serde(rename = "internal_error")]
     InternalError,
 }

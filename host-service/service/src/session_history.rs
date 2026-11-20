@@ -65,12 +65,22 @@ fn claude_sessions(environment: &TranscriptEnvironment, cwd: &str) -> Vec<Histor
 
 fn codex_sessions(environment: &TranscriptEnvironment, cwd: &str) -> Vec<HistorySession> {
     let mut paths = Vec::new();
-    transcript::collect_files(&transcript::codex_home(environment).join("sessions"), transcript::CODEX_SEARCH_DEPTH, &mut paths);
+    transcript::collect_files(
+        &transcript::codex_home(environment).join("sessions"),
+        transcript::CODEX_SEARCH_DEPTH,
+        &mut paths,
+    );
     let mut files: Vec<(String, PathBuf, SystemTime)> = paths
         .into_iter()
-        .filter(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl")))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+        })
         .map(|path| {
-            let modified = std::fs::metadata(&path).and_then(|metadata| metadata.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            let modified = std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
             (String::new(), path, modified)
         })
         .collect();
@@ -107,13 +117,23 @@ fn session(id: String, modified: SystemTime, message: Option<String>) -> History
 
 /// 空白合併、截到 `SUMMARY_CHARACTERS` 字。
 fn summary(message: &str) -> String {
-    message.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(SUMMARY_CHARACTERS).collect()
+    message
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(SUMMARY_CHARACTERS)
+        .collect()
 }
 
 /// 檔案開頭(最多 `SCAN_BYTES`)第一個 `pick` 回 Some 的 JSON 行。
 fn first_line_matching<T>(path: &Path, pick: impl Fn(&Value) -> Option<T>) -> Option<T> {
     let reader = BufReader::new(File::open(path).ok()?.take(SCAN_BYTES));
-    reader.split(b'\n').map_while(Result::ok).filter_map(|line| serde_json::from_slice::<Value>(&line).ok()).find_map(|line| pick(&line))
+    reader
+        .split(b'\n')
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_slice::<Value>(&line).ok())
+        .find_map(|line| pick(&line))
 }
 
 /// Claude:使用者自己打的文字，略過 isMeta、`<…>` 開頭(指令與系統注入)、中斷提示與工具結果。

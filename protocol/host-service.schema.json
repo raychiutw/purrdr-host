@@ -67,7 +67,11 @@
         { "$ref": "#/$defs/PaneRead" },
         { "$ref": "#/$defs/SessionsList" },
         { "$ref": "#/$defs/GitStatus" },
-        { "$ref": "#/$defs/GitDiff" }
+        { "$ref": "#/$defs/GitDiff" },
+        { "$ref": "#/$defs/QueueList" },
+        { "$ref": "#/$defs/QueueAdd" },
+        { "$ref": "#/$defs/QueueRemove" },
+        { "$ref": "#/$defs/QueueReorder" }
       ]
     },
     "ServerMessage": {
@@ -116,7 +120,12 @@
         { "$ref": "#/$defs/PaneReadResult" },
         { "$ref": "#/$defs/SessionsListResult" },
         { "$ref": "#/$defs/GitStatusResult" },
-        { "$ref": "#/$defs/GitDiffResult" }
+        { "$ref": "#/$defs/GitDiffResult" },
+        { "$ref": "#/$defs/QueueListResult" },
+        { "$ref": "#/$defs/QueueAddResult" },
+        { "$ref": "#/$defs/QueueRemoveResult" },
+        { "$ref": "#/$defs/QueueReorderResult" },
+        { "$ref": "#/$defs/QueueChanged" }
       ]
     },
     "Hello": {
@@ -919,6 +928,135 @@
       "type": "string",
       "enum": ["binary", "too_large", "excluded"]
     },
+    "QueueList": {
+      "description": "Send When Done 佇列(raychiutw/purrdr.host#30):主機服務的 Agent 觀察者在 Agent 從 working 變成 idle／done 時送出佇列的第一則(經 expected_session 比對)。帶 pane_id 時只回這個 pane。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "queue.list" },
+        "request_id": { "type": "string" },
+        "pane_id": { "type": "string" }
+      },
+      "required": ["type", "request_id"]
+    },
+    "QueueListResult": {
+      "description": "有排隊訊息的 pane 的佇列。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "queue.list.result" },
+        "request_id": { "type": "string" },
+        "queues": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PaneQueue" }
+        }
+      },
+      "required": ["type", "request_id", "queues"]
+    },
+    "PaneQueue": {
+      "description": "一個 pane 的佇列，依送出順序。",
+      "type": "object",
+      "properties": {
+        "pane_id": { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/QueuedPrompt" }
+        },
+        "paused": { "$ref": "#/$defs/QueuePause" }
+      },
+      "required": ["pane_id", "items"]
+    },
+    "QueuedPrompt": {
+      "description": "排隊的一則訊息。",
+      "type": "object",
+      "properties": {
+        "item_id": { "type": "string" },
+        "text": { "type": "string" },
+        "expected_session": { "type": "string" }
+      },
+      "required": ["item_id", "text"]
+    },
+    "QueuePause": {
+      "description": "佇列暫停的原因。session_changed:要送出時 pane 的 Agent session 已不是 expected_session,沒有送出;對這個 pane 的佇列做 add／remove／reorder 後解除，下次 Agent 做完再試。",
+      "type": "string",
+      "enum": ["session_changed"]
+    },
+    "QueueAdd": {
+      "description": "排一則訊息到 pane 的佇列尾端。每個 pane 最多 20 則(超過回 queue_full),每則最多 64 KiB(UTF-8)。佇列存在狀態資料夾，主機服務重啟後還在;稽核不記內容。",
+      "type": "object",
+      "x-write": true,
+      "properties": {
+        "type": { "const": "queue.add" },
+        "request_id": { "type": "string" },
+        "pane_id": { "type": "string" },
+        "text": { "type": "string" },
+        "expected_session": { "type": "string" }
+      },
+      "required": ["type", "request_id", "pane_id", "text"]
+    },
+    "QueueAddResult": {
+      "description": "已排入佇列。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "queue.add.result" },
+        "request_id": { "type": "string" },
+        "item_id": { "type": "string" }
+      },
+      "required": ["type", "request_id", "item_id"]
+    },
+    "QueueRemove": {
+      "description": "從佇列刪除一則;不在佇列裡回 queue_item_unknown。",
+      "type": "object",
+      "x-write": true,
+      "properties": {
+        "type": { "const": "queue.remove" },
+        "request_id": { "type": "string" },
+        "pane_id": { "type": "string" },
+        "item_id": { "type": "string" }
+      },
+      "required": ["type", "request_id", "pane_id", "item_id"]
+    },
+    "QueueRemoveResult": {
+      "description": "已刪除。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "queue.remove.result" },
+        "request_id": { "type": "string" }
+      },
+      "required": ["type", "request_id"]
+    },
+    "QueueReorder": {
+      "description": "重排佇列:item_ids 必須恰好是目前佇列的所有 item_id(換順序);否則回 queue_item_unknown。",
+      "type": "object",
+      "x-write": true,
+      "properties": {
+        "type": { "const": "queue.reorder" },
+        "request_id": { "type": "string" },
+        "pane_id": { "type": "string" },
+        "item_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["type", "request_id", "pane_id", "item_ids"]
+    },
+    "QueueReorderResult": {
+      "description": "已重排。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "queue.reorder.result" },
+        "request_id": { "type": "string" }
+      },
+      "required": ["type", "request_id"]
+    },
+    "QueueChanged": {
+      "description": "某個 pane 的佇列變了(新增、刪除、重排、送出或暫停),推給所有連線。sent_item_id:這次變更是因為這則已送出。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "queue.changed" },
+        "queue": { "$ref": "#/$defs/PaneQueue" },
+        "sent_item_id": { "type": "string" }
+      },
+      "required": ["type", "queue"]
+    },
     "HistorySession": {
       "description": "一個過去的 session。",
       "type": "object",
@@ -1375,7 +1513,7 @@
       "required": ["type", "code", "message"]
     },
     "ErrorCode": {
-      "description": "錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。",
+      "description": "錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;queue_full:這個 pane 的 Send When Done 佇列已有 20 則;queue_item_unknown:queue.remove／queue.reorder 的 item_id 不在佇列裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。",
       "type": "string",
       "enum": [
         "invalid_message",
@@ -1406,6 +1544,8 @@
         "pane_changed",
         "cwd_not_allowed",
         "not_git_repository",
+        "queue_full",
+        "queue_item_unknown",
         "internal_error"
       ]
     }

@@ -19,7 +19,11 @@ const OLDER: &str = "0b9e6f1c-2d4a-4c8e-9f00-5a1b2c3d4e5f";
 const NEWER: &str = "48b84c34-58a1-465f-94b2-370ed0699957";
 
 fn project_folder() -> String {
-    if cfg!(windows) { r"C:\Users\demo\Projects\garden-journal".to_owned() } else { "/Users/demo/Projects/garden-journal".to_owned() }
+    if cfg!(windows) {
+        r"C:\Users\demo\Projects\garden-journal".to_owned()
+    } else {
+        "/Users/demo/Projects/garden-journal".to_owned()
+    }
 }
 
 fn write(path: &Path, lines: &[Value], modified: SystemTime) {
@@ -54,7 +58,10 @@ fn claude_home() -> TempDir {
     );
     write(
         &projects.join(format!("{NEWER}.jsonl")),
-        &[user(json!([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}])), user(json!("x".repeat(300)))],
+        &[
+            user(json!([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}])),
+            user(json!("x".repeat(300))),
+        ],
         at(1_763_690_000),
     );
     std::fs::create_dir_all(projects.join("memory")).unwrap();
@@ -154,7 +161,12 @@ async fn a_folder_without_sessions_lists_nothing_and_relative_folders_are_reject
 }
 
 fn forwarded_start(herdr: &FakeHerdr) -> Value {
-    herdr.requests().into_iter().find(|request| request["method"] == "agent.start").expect("沒有送出 agent.start")["params"].clone()
+    herdr
+        .requests()
+        .into_iter()
+        .find(|request| request["method"] == "agent.start")
+        .expect("沒有送出 agent.start")["params"]
+        .clone()
 }
 
 #[tokio::test]
@@ -180,8 +192,19 @@ async fn resuming_claude_passes_resume_after_the_permission_mode() {
 #[tokio::test]
 async fn resuming_codex_uses_the_resume_subcommand() {
     let home = TempDir::new().unwrap();
-    let rollout = home.path().join(".codex").join("sessions").join("2025").join("11").join("20").join(format!("rollout-2025-11-20T08-00-00-{OLDER}.jsonl"));
-    write(&rollout, &[json!({"type": "session_meta", "payload": {"id": OLDER, "cwd": project_folder()}})], at(1_763_600_000));
+    let rollout = home
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2025")
+        .join("11")
+        .join("20")
+        .join(format!("rollout-2025-11-20T08-00-00-{OLDER}.jsonl"));
+    write(
+        &rollout,
+        &[json!({"type": "session_meta", "payload": {"id": OLDER, "cwd": project_folder()}})],
+        at(1_763_600_000),
+    );
     let herdr = plain_herdr().await;
     let (_service, mut client) = connected(&herdr, &home).await;
 
@@ -212,7 +235,12 @@ async fn a_session_without_a_transcript_is_not_started() {
 
 #[tokio::test]
 async fn unsafe_ids_and_other_agents_cannot_resume() {
-    for (kind, session) in [("claude", "../../etc/passwd"), ("claude", "--dangerously-skip-permissions"), ("claude", ""), ("opencode", OLDER)] {
+    for (kind, session) in [
+        ("claude", "../../etc/passwd"),
+        ("claude", "--dangerously-skip-permissions"),
+        ("claude", ""),
+        ("opencode", OLDER),
+    ] {
         let home = claude_home();
         let herdr = plain_herdr().await;
         let (_service, mut client) = connected(&herdr, &home).await;

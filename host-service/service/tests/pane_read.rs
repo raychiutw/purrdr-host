@@ -18,7 +18,12 @@ async fn herdr_replying(reply: Value) -> FakeHerdr {
 }
 
 fn forwarded_read(herdr: &FakeHerdr) -> Value {
-    herdr.requests().into_iter().find(|request| request["method"] == "pane.read").expect("沒有送出 pane.read")["params"].clone()
+    herdr
+        .requests()
+        .into_iter()
+        .find(|request| request["method"] == "pane.read")
+        .expect("沒有送出 pane.read")["params"]
+        .clone()
 }
 
 #[tokio::test]
@@ -28,7 +33,9 @@ async fn visible_text_returns_the_screen_and_its_fingerprint() {
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
 
-    let reply = client.request(json!({"type": "pane.read", "request_id": "r2", "pane_id": "w9:p1", "source": "visible"})).await;
+    let reply = client
+        .request(json!({"type": "pane.read", "request_id": "r2", "pane_id": "w9:p1", "source": "visible"}))
+        .await;
 
     assert_eq!(
         reply,
@@ -71,7 +78,9 @@ async fn pane_ids_that_are_not_pane_terminal_targets_never_reach_herdr() {
         let mut client = TestClient::connect(&service).await;
         client.request(hello("r1")).await;
 
-        let reply = client.request(json!({"type": "pane.read", "request_id": "r2", "pane_id": pane_id, "source": "visible"})).await;
+        let reply = client
+            .request(json!({"type": "pane.read", "request_id": "r2", "pane_id": pane_id, "source": "visible"}))
+            .await;
 
         assert_eq!(reply["code"], "invalid_message", "{pane_id:?}");
         assert_eq!(herdr.methods(), ["ping"], "{pane_id:?}");
@@ -85,7 +94,9 @@ async fn unknown_panes_report_the_herdr_error() {
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
 
-    let reply = client.request(json!({"type": "pane.read", "request_id": "r2", "pane_id": "w9:pZ", "source": "visible"})).await;
+    let reply = client
+        .request(json!({"type": "pane.read", "request_id": "r2", "pane_id": "w9:pZ", "source": "visible"}))
+        .await;
 
     assert_eq!(reply["type"], "error");
     assert_eq!(reply["code"], "herdr_error");
@@ -100,7 +111,9 @@ async fn read_only_devices_can_read_the_screen() {
     let mut client = TestClient::connect_with_token(&service, Some(&device.device_token)).await;
     client.request(hello("r1")).await;
 
-    let reply = client.request(json!({"type": "pane.read", "request_id": "r2", "pane_id": "w9:p1", "source": "visible"})).await;
+    let reply = client
+        .request(json!({"type": "pane.read", "request_id": "r2", "pane_id": "w9:p1", "source": "visible"}))
+        .await;
 
     assert_eq!(reply["screen"], "8a58485a53c41e264556371d2d22a46a0343c51f1dd54fe3fc72971bf5cda52f");
 }

@@ -178,13 +178,17 @@ fn worktree_id(repo: &gix::Repository, full: &Path, indexed: Option<&gix::index:
         }
     }
     let bytes = worktree_bytes(full, &metadata).map_err(read_failure)?;
-    gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, &bytes).map(Some).map_err(read_failure)
+    gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, &bytes)
+        .map(Some)
+        .map_err(read_failure)
 }
 
 /// 工作目錄的內容;symlink 是連結目標(與 git 存的 blob 相同)。
 fn worktree_bytes(full: &Path, metadata: &std::fs::Metadata) -> std::io::Result<Vec<u8>> {
     if metadata.file_type().is_symlink() {
-        return Ok(gix::path::os_string_into_bstring(std::fs::read_link(full)?.into_os_string()).map_err(std::io::Error::other)?.into());
+        return Ok(gix::path::os_string_into_bstring(std::fs::read_link(full)?.into_os_string())
+            .map_err(std::io::Error::other)?
+            .into());
     }
     std::fs::read(full)
 }
@@ -215,7 +219,11 @@ fn untracked(repository: &Repository, index: &gix::worktree::Index, tracked: &BT
                 continue;
             };
             let path = relative.join(&name);
-            let mode = if file_type.is_dir() { gix::index::entry::Mode::DIR } else { gix::index::entry::Mode::FILE };
+            let mode = if file_type.is_dir() {
+                gix::index::entry::Mode::DIR
+            } else {
+                gix::index::entry::Mode::FILE
+            };
             if excludes.at_path(&path, Some(mode)).map_err(read_failure)?.is_excluded() {
                 continue;
             }

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub mod agent_activity;
+pub mod agent_observer;
 pub mod audit_log;
 pub mod auto_update;
 mod connection;
@@ -64,6 +65,8 @@ pub struct HostServiceConfig {
     pub temporary_directory: Option<PathBuf>,
     /// 從 app 管理主機服務(更新、自動更新);None 時 app 收到 host_service_not_installed。
     pub service_management: Option<remote_management::ServiceManagement>,
+    /// 常駐的 Agent 觀察者(Send When Done 佇列);None 時不啟動(測試預設)。
+    pub observer: Option<agent_observer::ObserverOptions>,
 }
 
 /// 預設埠(127.0.0.1 上)。
@@ -121,6 +124,7 @@ impl HostServiceConfig {
             service_management: crate::install::HostEnvironment::from_process()
                 .ok()
                 .and_then(remote_management::for_installed_copy),
+            observer: Some(agent_observer::ObserverOptions::default()),
         })
     }
 }
@@ -131,6 +135,8 @@ pub struct RunningHostService {
     accept_loop: tokio::task::JoinHandle<()>,
     /// 定期刪除超過 7 天的上傳檔;找不到家目錄時沒有。
     upload_cleanup: Option<tokio::task::JoinHandle<()>>,
+    /// Agent 觀察者的常駐 task。
+    observer: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RunningHostService {
@@ -151,6 +157,9 @@ impl Drop for RunningHostService {
         if let Some(upload_cleanup) = &self.upload_cleanup {
             upload_cleanup.abort();
         }
+        if let Some(observer) = &self.observer {
+            observer.abort();
+        }
     }
 }
 
@@ -163,8 +172,15 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         .home
         .as_deref()
         .map(|home| uploads::spawn_cleanup(uploads::UploadDirectory::under_home(home), std::time::SystemTime::now));
+    let herdr = HerdrClient::new(config.herdr_socket);
+    let observer = config.observer.map(|options| {
+        let observer = agent_observer::AgentObserver::load(&config.state_directory);
+        let task = agent_observer::spawn(herdr.clone(), observer.clone(), options);
+        (observer, task)
+    });
     let router = http::router(http::ServiceContext {
-        herdr: HerdrClient::new(config.herdr_socket),
+        herdr,
+        observer: observer.as_ref().map(|(observer, _)| observer.clone()),
         push: push_plugin::PushPlugin::new(config.herdr_cli.clone(), config.transcripts.home.clone()),
         herdr_cli: config.herdr_cli,
         devices: DeviceStore::new(&config.state_directory),
@@ -187,5 +203,6 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         local_addr,
         accept_loop,
         upload_cleanup,
+        observer: observer.map(|(_, task)| task),
     })
 }

@@ -46,7 +46,9 @@ pub(crate) async fn read(herdr: &HerdrClient, request: PaneRead) -> ServerMessag
 
 /// 目前可見區(text)的指紋;送出前比對與卡住偵測用。
 pub(crate) async fn current_fingerprint(herdr: &HerdrClient, pane_id: &str) -> Result<String, HerdrFailure> {
-    let result = herdr.request("pane.read", json!({"pane_id": pane_id, "source": "visible", "format": "text"})).await?;
+    let result = herdr
+        .request("pane.read", json!({"pane_id": pane_id, "source": "visible", "format": "text"}))
+        .await?;
     read_text(&result)
         .map(|(text, _)| fingerprint(&text))
         .ok_or_else(|| HerdrFailure::UnexpectedResponse("herdr pane.read returned no text".to_owned()))
