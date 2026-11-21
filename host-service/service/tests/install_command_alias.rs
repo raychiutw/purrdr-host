@@ -39,8 +39,10 @@ fn windows_adds_a_purrdr_cmd_that_forwards_arguments_and_shows_help_without_them
         script,
         "@rem purrdr-host-service command alias\r\n\
          @if \"%~1\"==\"\" \"%~dp0purrdr-host-service.exe\" help & exit /b 2\r\n\
-         @\"%~dp0purrdr-host-service.exe\" %* & exit /b\r\n"
+         @\"%~dp0purrdr-host-service.exe\" %*\r\n"
     );
+    // 最後一行不能再接 `& exit /b`:不帶結束碼的 exit 會把錯誤碼蓋成 0,失敗的指令會被當成成功
+    // (0.10.0 在 Windows PC 實測)。
 }
 
 #[test]
