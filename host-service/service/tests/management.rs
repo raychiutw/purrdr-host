@@ -216,3 +216,32 @@ fn pair_wait_keeps_the_qr_code_on_screen_until_enter() {
     pair.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
     assert!(pair.wait().unwrap().success());
 }
+
+/// `pair --wait` 失敗時也要等 Enter,popup 才不會在使用者看到錯誤前就關掉。
+#[test]
+fn pair_wait_keeps_an_error_on_screen_until_enter() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let state_directory = tempfile::tempdir().unwrap();
+    let mut pair = Command::new(env!("CARGO_BIN_EXE_purrdr-host-service"))
+        .args(arguments("pair --wait", state_directory.path()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(pair.stderr.take().unwrap());
+    let mut error = String::new();
+    while !error.contains("--address") {
+        let mut line = String::new();
+        assert_ne!(stderr.read_line(&mut line).unwrap(), 0, "沒印出錯誤就結束了：{error}");
+        error.push_str(&line);
+    }
+
+    // 先看到錯誤再檢查：剛建置的執行檔第一次啟動可能很慢，不能只靠固定的等待時間。
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(pair.try_wait().unwrap().is_none(), "印出錯誤後沒等 Enter 就結束了");
+    pair.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+    assert!(!pair.wait().unwrap().success());
+}

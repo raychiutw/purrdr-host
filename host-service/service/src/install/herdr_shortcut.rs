@@ -57,23 +57,46 @@ pub(super) fn add(file: &Path, executable: &Path, platform: InstallPlatform, cha
     }
     let existing = read_if_exists(file)?;
     let mut contents = without_block(existing.as_deref().unwrap_or_default());
-    if contents.contains(KEY) {
+    let skipped = |reason: String| Outcome::Skipped(format!("the herdr shortcut for pairing was not added: {reason}"));
+    let Ok(config) = contents.parse::<toml::Table>() else {
         remove(change)?;
-        return Ok(Outcome::Skipped(format!(
-            "{KEY} is already bound in {}; the herdr shortcut for pairing was not added",
+        return Ok(skipped(format!("{} is not valid TOML", file.display())));
+    };
+    if binds_key(&config) {
+        remove(change)?;
+        return Ok(skipped(format!("{KEY} is already bound in {}", file.display())));
+    }
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(&shortcut_block(&pair_command(executable, platform)));
+    if contents.parse::<toml::Table>().is_err() {
+        remove(change)?;
+        return Ok(skipped(format!(
+            "adding it would make {} invalid (keys.command is defined differently there)",
             file.display()
         )));
     }
     if change.config_file.is_none() {
         change.config_file_created = existing.is_none();
     }
-    if !contents.is_empty() && !contents.ends_with('\n') {
-        contents.push('\n');
-    }
-    contents.push_str(&shortcut_block(&pair_command(executable, platform)));
     std::fs::write(file, contents).map_err(InstallError::io)?;
     change.config_file = Some(file.to_path_buf());
     Ok(Outcome::Added)
+}
+
+/// `[keys]` 裡是否已有綁到 `KEY` 的按鍵:內建動作的綁定值(字串或字串陣列)與 `[[keys.command]]` 的 `key`。
+/// herdr 解析按鍵不分大小寫;說明文字與註解不算。
+fn binds_key(config: &toml::Table) -> bool {
+    let Some(keys) = config.get("keys").and_then(toml::Value::as_table) else {
+        return false;
+    };
+    let is_key = |value: &toml::Value| value.as_str().is_some_and(|text| text.trim().eq_ignore_ascii_case(KEY));
+    keys.iter().any(|(name, value)| match (name.as_str(), value) {
+        ("command", toml::Value::Array(commands)) => commands.iter().any(|command| command.get("key").is_some_and(is_key)),
+        (_, toml::Value::Array(bindings)) => bindings.iter().any(is_key),
+        (_, binding) => is_key(binding),
+    })
 }
 
 /// 移除快捷鍵區塊;config.toml 是安裝時新建、移除後是空的就刪掉。

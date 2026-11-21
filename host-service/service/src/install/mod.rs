@@ -579,7 +579,7 @@ struct InstallRecord {
     /// 安裝對 PATH 做的變更。
     #[serde(default)]
     path: user_path::PathChange,
-    /// 安裝對 herdr config 加的快捷鍵(0.8.0 以前的紀錄沒有這欄)。
+    /// 安裝對 herdr config 加的快捷鍵(0.8.0 及以前的紀錄沒有這欄)。
     #[serde(default)]
     herdr_shortcut: herdr_shortcut::ShortcutChange,
 }
@@ -805,14 +805,20 @@ impl<S: HostSystem> Installer<S> {
                 self.record_created(&directory, record);
             }
         }
-        let herdr_config = herdr_shortcut::config_file(&self.environment);
-        if let Some(directory) = herdr_config.parent() {
-            self.create_directory(directory, record)?;
-        }
-        let shortcut = herdr_shortcut::add(&herdr_config, &layout.executable(), self.environment.platform, &mut record.herdr_shortcut)?;
+        let shortcut = self.add_herdr_shortcut(layout, record);
         write_json(&layout.record_file(), record)?;
         autostart::register(&mut self.system, layout, &service_arguments(record))?;
         Ok(shortcut)
+    }
+
+    /// herdr 快捷鍵是附加功能：寫不進 herdr config 時只給警告，不讓安裝失敗。
+    fn add_herdr_shortcut(&self, layout: &ServiceLayout, record: &mut InstallRecord) -> herdr_shortcut::Outcome {
+        let file = herdr_shortcut::config_file(&self.environment);
+        let added = file
+            .parent()
+            .map_or(Ok(()), |directory| self.create_directory(directory, record))
+            .and_then(|()| herdr_shortcut::add(&file, &layout.executable(), self.environment.platform, &mut record.herdr_shortcut));
+        added.unwrap_or_else(|error| herdr_shortcut::Outcome::Skipped(format!("the herdr shortcut for pairing was not added to {}: {error}", file.display())))
     }
 
     /// 安裝失敗時盡力還原;還原本身的錯誤不蓋過原本的錯誤。

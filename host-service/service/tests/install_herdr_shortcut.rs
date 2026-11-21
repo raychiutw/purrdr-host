@@ -145,3 +145,64 @@ fn install_message_tells_the_herdr_shortcut() {
     assert_eq!(installed.herdr_shortcut.as_deref(), Some("prefix+alt+p"));
     assert!(installed.to_string().contains("In herdr, press prefix+alt+p"), "{installed}");
 }
+
+fn install_with_config(host: &TestHost, before: &str) -> (purrdr_host_service::install::Installed, String) {
+    let config = host.home.0.join(".config/herdr/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, before).unwrap();
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+    let installed = installer.install(&host.options(PORT), |_| true).unwrap();
+    (installed, std::fs::read_to_string(&config).unwrap())
+}
+
+#[test]
+fn key_written_in_another_case_counts_as_already_bound() {
+    let host = TestHost::new(InstallPlatform::MacOs);
+    let before = "[[keys.command]]\nkey = \"Prefix+Alt+P\"\ntype = \"popup\"\ncommand = \"htop\"\n";
+
+    let (installed, after) = install_with_config(&host, before);
+
+    assert_eq!(after, before, "herdr 解析按鍵不分大小寫");
+    assert_eq!(installed.herdr_shortcut, None);
+}
+
+#[test]
+fn key_mentioned_only_in_a_comment_or_description_is_not_a_conflict() {
+    let host = TestHost::new(InstallPlatform::MacOs);
+    let before =
+        "# 以前用過 prefix+alt+p\n[[keys.command]]\nkey = \"prefix+alt+g\"\ntype = \"popup\"\ncommand = \"lazygit\"\ndescription = \"not prefix+alt+p\"\n";
+
+    let (installed, after) = install_with_config(&host, before);
+
+    assert_eq!(installed.herdr_shortcut.as_deref(), Some("prefix+alt+p"));
+    assert!(after.starts_with(before), "{after}");
+}
+
+#[test]
+fn config_where_the_block_would_break_toml_is_left_alone_with_a_warning() {
+    let host = TestHost::new(InstallPlatform::MacOs);
+    // 以 inline array 定義 keys.command 時再接 [[keys.command]] 是重複定義，整份 config 會讀不了。
+    let before = "[keys]\ncommand = [{ key = \"prefix+alt+g\", type = \"popup\", command = \"lazygit\" }]\n";
+
+    let (installed, after) = install_with_config(&host, before);
+
+    assert_eq!(after, before);
+    assert_eq!(installed.herdr_shortcut, None);
+    assert!(installed.warnings.iter().any(|warning| warning.contains("herdr")), "{:?}", installed.warnings);
+}
+
+#[test]
+fn herdr_config_that_cannot_be_written_does_not_fail_the_install() {
+    let host = TestHost::new(InstallPlatform::MacOs);
+    let blocker = host.home.0.join("not-a-folder");
+    std::fs::write(&blocker, "file").unwrap();
+    let mut environment = host.environment();
+    environment.herdr_config_file = Some(blocker.join("config.toml"));
+    let mut installer = Installer::new(environment, FakeSystem::ready(&host.home.0));
+
+    let installed = installer.install(&host.options(PORT), |_| true).unwrap();
+
+    assert_eq!(installed.herdr_shortcut, None);
+    assert!(installed.warnings.iter().any(|warning| warning.contains("herdr")), "{:?}", installed.warnings);
+    installer.uninstall().unwrap();
+}
