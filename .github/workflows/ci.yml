@@ -41,6 +41,14 @@ jobs:
           rustup default stable
           cargo --version
 
+      # Release 頁面的「本版更新」取自這份檔案，升版時要一起寫。
+      - name: 版本說明
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          version="$(scripts/host-service-version.sh)"
+          grep -qx "## $version" host-service/CHANGELOG.md || { echo "::error::host-service/CHANGELOG.md 缺少 ## $version 的版本說明"; exit 1; }
+
       - name: 格式與 clippy
         if: runner.os == 'Linux'
         run: |
