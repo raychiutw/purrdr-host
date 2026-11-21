@@ -3,6 +3,7 @@
 //! `purrdr-host-service --version`:印出版本(一行安裝腳本與 app 的更新提示用，#198)。
 //! `purrdr-host-service install [--port <埠>] [--session <herdr session>] [--yes]`、`uninstall`、`status`:安裝(見 `install`)。
 //! `purrdr-host-service update [--check] [--yes]`、`version`:更新到最新 Release、顯示版本(見 `update`)。
+//! `purrdr-host-service help`:印出可用指令。安裝時在 `bin/` 放的別名 `purrdr` 不帶參數時也印這份(#53)。
 
 use std::process::ExitCode;
 use std::time::SystemTime;
@@ -11,9 +12,35 @@ use purrdr_host_service::herdr_socket::{Platform, SocketEnvironment};
 use purrdr_host_service::install::{self, InstallCommand};
 use purrdr_host_service::management;
 
+/// 可用指令(用別名 `purrdr` 的寫法)。
+const HELP: &str = "\
+usage: purrdr <command>  (same as purrdr-host-service <command>)
+
+  purrdr pair [--read-only] [--address <https address>] [--wait]   show a pairing QR code
+  purrdr devices                                                   list paired devices
+  purrdr revoke <device id>                                        remove a paired device
+  purrdr install [--port <port>] [--https-port <port>] [--session <herdr session>] [--yes] [--no-auto-update] [--no-path]
+  purrdr status                                                    show the service status
+  purrdr update [--check] [--yes]                                  update to the latest release
+  purrdr auto-update on|off                                        turn automatic updates on or off
+  purrdr version                                                   show the installed version
+  purrdr uninstall                                                 remove the host service
+
+pair, devices and revoke also take --state-dir <dir> (default ~/.purrdr/host-service).
+";
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(arguments.as_slice(), [command] if command == "help" || command == "--help" || command == "-h") {
+        print!("{HELP}");
+        return ExitCode::SUCCESS;
+    }
+    // 自動啟動以完整名稱不帶參數啟動服務;只打別名 `purrdr` 時是人在問怎麼用。
+    if arguments.is_empty() && invoked_as_command_alias() {
+        eprint!("{HELP}");
+        return ExitCode::from(2);
+    }
     if matches!(arguments.as_slice(), [flag] if flag == "--version" || flag == "-V") {
         println!("purrdr-host-service {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
@@ -31,6 +58,14 @@ async fn main() -> ExitCode {
         Some("pair" | "devices" | "revoke") => run_management(&arguments),
         _ => purrdr_host_service::run_service(&arguments).await,
     }
+}
+
+/// 以 `bin/` 的別名 `purrdr` 執行(symlink 保留 argv[0] 的名稱)。
+fn invoked_as_command_alias() -> bool {
+    std::env::args_os()
+        .next()
+        .and_then(|program| std::path::Path::new(&program).file_stem().map(|stem| stem == "purrdr"))
+        .unwrap_or(false)
 }
 
 fn run_management(arguments: &[String]) -> ExitCode {

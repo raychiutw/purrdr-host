@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 mod autostart;
 mod command;
+mod command_alias;
 mod herdr_shortcut;
 mod location;
 pub mod system;
@@ -16,6 +17,7 @@ mod tailscale;
 mod user_path;
 
 pub use command::run_command;
+pub use command_alias::CommandAlias;
 pub use location::{HelperLauncher, InstalledService};
 use system::HostSystem;
 use tailscale::Tailscale;
@@ -306,6 +308,8 @@ pub struct Installed {
     pub added_to_path: bool,
     /// 在 herdr 裡顯示配對 QR code 的快捷鍵;沒加(按鍵已被使用者占用)時是 None。
     pub herdr_shortcut: Option<String>,
+    /// `bin/` 有指令別名 `purrdr`(raychiutw/purrdr.host#53)。
+    pub command_alias: bool,
 }
 
 impl std::fmt::Display for Installed {
@@ -313,7 +317,14 @@ impl std::fmt::Display for Installed {
         writeln!(formatter, "Installed. The host service starts at login.")?;
         writeln!(formatter, "HTTPS address: {}", self.https_address)?;
         writeln!(formatter, "To pair a device:")?;
-        writeln!(formatter, "  1. On this computer run: {}", self.pair_command)?;
+        // 別名要等新終端機讀到 PATH 才打得到，沒加 PATH 時只給完整路徑。
+        let short_name = self.command_alias && self.added_to_path;
+        if short_name {
+            writeln!(formatter, "  1. Open a new terminal and run: {} pair", command_alias::NAME)?;
+            writeln!(formatter, "     (or run it now: {})", self.pair_command)?;
+        } else {
+            writeln!(formatter, "  1. On this computer run: {}", self.pair_command)?;
+        }
         if let Some(shortcut) = &self.herdr_shortcut {
             writeln!(
                 formatter,
@@ -326,7 +337,8 @@ impl std::fmt::Display for Installed {
             self.https_address
         )?;
         if self.added_to_path {
-            write!(formatter, "\nAdded to your PATH: open a new terminal to run purrdr-host-service directly.")?;
+            let name = if self.command_alias { command_alias::NAME } else { "purrdr-host-service" };
+            write!(formatter, "\nAdded to your PATH: open a new terminal to run {name} directly.")?;
         }
         Ok(())
     }
@@ -700,6 +712,17 @@ impl<S: HostSystem> Installer<S> {
             }
         };
         let mut warnings = Vec::new();
+        let command_alias = match command_alias::ensure(&layout) {
+            Ok(command_alias::CommandAlias::Created | command_alias::CommandAlias::Present) => true,
+            Ok(command_alias::CommandAlias::Taken(file)) => {
+                warnings.push(format!("the purrdr command was not added: {} already exists", file.display()));
+                false
+            }
+            Err(error) => {
+                warnings.push(format!("the purrdr command was not added: {error}"));
+                false
+            }
+        };
         let herdr_shortcut = match shortcut {
             herdr_shortcut::Outcome::Added => Some(herdr_shortcut::KEY.to_owned()),
             herdr_shortcut::Outcome::Skipped(warning) => {
@@ -719,6 +742,7 @@ impl<S: HostSystem> Installer<S> {
             pair_command: format!("{} pair", shell_quoted(&layout.executable(), self.environment.platform)),
             added_to_path: record.add_to_path,
             herdr_shortcut,
+            command_alias,
         })
     }
 
