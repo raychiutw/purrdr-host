@@ -399,6 +399,24 @@ async fn the_configured_state_directory_is_denied_even_under_the_working_directo
 }
 
 #[tokio::test]
+async fn the_logs_folder_inside_the_state_directory_is_denied() {
+    // raychiutw/purrdr.host#42:log 與稽核紀錄都在主機服務資料夾的 logs/ 底下,app 不能讀走。
+    let fixture = Fixture::start_with(FixtureOptions {
+        state_directory: Some("ledger/service-state"),
+        ..FixtureOptions::default()
+    })
+    .await;
+    let log = fixture.service.state_path.join("logs").join("host-service.log");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, "started\n").unwrap();
+    let mut client = fixture.client().await;
+
+    let reply = client.request(stat(&log)).await;
+
+    assert_eq!(reply["status"], "denied");
+}
+
+#[tokio::test]
 async fn excluded_locations_are_matched_without_case() {
     let fixture = Fixture::start().await;
     let key = fixture.in_project(".SSH/id_ed25519", b"hello");
@@ -453,6 +471,23 @@ async fn a_temporary_file_the_agent_mentions_is_allowed_even_when_home_is_the_wo
     fixture.agent_mentions(&mut client, &image).await;
 
     let reply = client.request(stat(&image)).await;
+
+    assert_eq!(reply["status"], "file");
+}
+
+#[tokio::test]
+async fn an_upload_in_the_temporary_upload_folder_the_agent_mentions_is_allowed() {
+    // 上傳資料夾在暫存目錄底下(raychiutw/purrdr.host#41):Agent 提到上傳的圖片時照樣讀得到。
+    let fixture = Fixture::start_with(FixtureOptions {
+        working_directory: WorkingDirectory::Home,
+        ..FixtureOptions::default()
+    })
+    .await;
+    let upload = fixture.in_temporary("purrdr-uploads-501/mh1-aaaaaaaa.jpg", b"hello");
+    let mut client = fixture.client().await;
+    fixture.agent_mentions(&mut client, &upload).await;
+
+    let reply = client.request(stat(&upload)).await;
 
     assert_eq!(reply["status"], "file");
 }

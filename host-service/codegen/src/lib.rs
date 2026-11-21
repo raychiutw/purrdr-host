@@ -6,7 +6,7 @@
 //! - 字串列舉:`type: string` + `enum`。
 //! - 訊息聯集:`oneOf` 只列 `$ref`,每個都是帶 `type` const 的物件。
 //!   有變體標 `x-write: true` 時，聯集多產生 `is_write()`(Swift `isWrite`)。
-//! - 頂層 `x-excluded-file-locations`、`x-temporary-file-locations`(字串陣列)與 `x-maximum-file-size`、`x-maximum-file-chunk`(整數):
+//! - 頂層 `x-excluded-file-locations`、`x-temporary-file-locations`(字串陣列)、`x-upload-folder`(字串)與 `x-maximum-file-size`、`x-maximum-file-chunk`(整數):
 //!   主機取檔的共用常數，兩端都產生(raychiutw/purrdr.ios#227)。
 
 use serde_json::Value;
@@ -61,6 +61,7 @@ pub struct Protocol {
     version: i64,
     excluded_file_locations: Vec<String>,
     temporary_file_locations: Vec<String>,
+    upload_folder: String,
     maximum_file_size: u64,
     maximum_file_chunk: u64,
     definitions: Vec<Definition>,
@@ -72,6 +73,7 @@ impl Protocol {
         let version = schema["x-protocol-version"].as_i64().ok_or("缺少 x-protocol-version")?;
         let excluded_file_locations = string_list(schema, "x-excluded-file-locations")?;
         let temporary_file_locations = string_list(schema, "x-temporary-file-locations")?;
+        let upload_folder = schema["x-upload-folder"].as_str().ok_or("缺少 x-upload-folder")?.to_owned();
         let maximum_file_size = schema["x-maximum-file-size"].as_u64().ok_or("缺少 x-maximum-file-size")?;
         let maximum_file_chunk = schema["x-maximum-file-chunk"].as_u64().ok_or("缺少 x-maximum-file-chunk")?;
         let definitions_json = schema["$defs"].as_object().ok_or("缺少 $defs")?;
@@ -83,6 +85,7 @@ impl Protocol {
             version,
             excluded_file_locations,
             temporary_file_locations,
+            upload_folder,
             maximum_file_size,
             maximum_file_chunk,
             definitions,
@@ -103,6 +106,10 @@ impl Protocol {
         output += &format!(
             "\n/// 主機取檔在工作目錄以外可放行的系統暫存目錄(schema 的 `x-temporary-file-locations`)。\npub const TEMPORARY_FILE_LOCATIONS: &[&str] = &[{}];\n",
             quoted(&self.temporary_file_locations)
+        );
+        output += &format!(
+            "\n/// 暫存目錄底下的上傳資料夾名稱(schema 的 `x-upload-folder`;Unix 之後接 `-<uid>`)。\npub const UPLOAD_FOLDER: &str = \"{}\";\n",
+            self.upload_folder
         );
         output += &format!(
             "\n/// 主機取檔的大小上限(schema 的 `x-maximum-file-size`)。\npub const MAXIMUM_FILE_SIZE: u64 = {};\n\n/// 主機取檔一次讀取最多回傳的 bytes(schema 的 `x-maximum-file-chunk`)。\npub const MAXIMUM_FILE_CHUNK: u64 = {};\n",
@@ -127,6 +134,10 @@ impl Protocol {
         output += &format!(
             "    /// 主機取檔在工作目錄以外可放行的系統暫存目錄(schema 的 `x-temporary-file-locations`)。\n    public static let temporaryFileLocations = [{}]\n",
             quoted(&self.temporary_file_locations)
+        );
+        output += &format!(
+            "    /// 暫存目錄底下的上傳資料夾名稱(schema 的 `x-upload-folder`;Unix 之後接 `-<uid>`)。\n    public static let uploadFolder = \"{}\"\n",
+            self.upload_folder
         );
         output += &format!(
             "    /// 主機取檔的大小上限(schema 的 `x-maximum-file-size`)。\n    public static let maximumFileSize = {}\n    /// 主機取檔一次讀取最多回傳的 bytes(schema 的 `x-maximum-file-chunk`)。\n    public static let maximumFileChunk = {}\n}}\n",

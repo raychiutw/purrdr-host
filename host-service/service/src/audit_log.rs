@@ -1,11 +1,11 @@
 //! 稽核紀錄 `audit.log`(JSON Lines):配對、連線、撤銷、寫入類操作與主機取檔。不記 prompt、按鍵、終端機與檔案內容。
 
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
 use serde::Serialize;
+
+use crate::service_log::RotatingLog;
 
 /// 一筆稽核事件。欄位只放識別資訊，不放操作內容。
 #[derive(Debug, Clone, Serialize)]
@@ -83,17 +83,28 @@ struct AuditLine<'a> {
     event: &'a AuditEvent,
 }
 
-/// 主機服務資料夾裡的 `audit.log`。
+/// 稽核紀錄的大小上限;超過就輪替成 `.1`(比服務 log 大:事後查「誰做了什麼」要能回溯得久一點)。
+pub const AUDIT_LOG_MAXIMUM_BYTES: u64 = 5 * 1024 * 1024;
+
+/// 主機服務資料夾裡的 `logs/audit.log`(舊版在資料夾根層的 `audit.log`,第一次開啟時搬進來)。
 #[derive(Debug, Clone)]
 pub struct AuditLog {
-    path: PathBuf,
+    log: RotatingLog,
 }
 
 impl AuditLog {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
-        AuditLog {
-            path: directory.into().join("audit.log"),
+        Self::with_maximum_bytes(directory, AUDIT_LOG_MAXIMUM_BYTES)
+    }
+
+    /// 指定輪替上限(測試用很小的值)。
+    pub fn with_maximum_bytes(directory: impl Into<PathBuf>, maximum_bytes: u64) -> Self {
+        let directory = directory.into();
+        let log = RotatingLog::new(directory.join("logs").join("audit.log"), maximum_bytes);
+        if let Err(error) = log.absorb(&directory.join("audit.log")) {
+            eprintln!("cannot move the old audit log into {}: {error}", directory.join("logs").display());
         }
+        AuditLog { log }
     }
 
     /// 附加一筆;寫不進去只印到 stderr,不影響請求本身。
@@ -102,16 +113,9 @@ impl AuditLog {
             time: humantime::format_rfc3339_seconds(now).to_string(),
             event: &event,
         };
-        let mut bytes = serde_json::to_vec(&line).expect("稽核事件可序列化");
-        bytes.push(b'\n');
-        let written = self
-            .path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|_| OpenOptions::new().create(true).append(true).open(&self.path))
-            .and_then(|mut file| file.write_all(&bytes));
-        if let Err(error) = written {
-            eprintln!("cannot write audit log {}: {error}", self.path.display());
+        let line = serde_json::to_string(&line).expect("稽核事件可序列化");
+        if let Err(error) = self.log.append_line(&line) {
+            eprintln!("cannot write audit log: {error}");
         }
     }
 }

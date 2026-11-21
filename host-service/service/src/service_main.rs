@@ -1,5 +1,6 @@
 //! 以命令列參數執行主機服務(`purrdr-host-service` 與 Windows 的 `purrdr-host-service-background` 共用)。
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use crate::herdr_socket::{Platform, SocketEnvironment};
@@ -16,21 +17,25 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
     };
     let herdr_socket = config.herdr_socket.clone();
     let state_directory = config.state_directory.clone();
+    let log = crate::service_log::ServiceLog::under(&state_directory);
     let service = match crate::start(config).await {
         Ok(service) => service,
         Err(error) => {
-            eprintln!("cannot listen: {error}");
+            log.record(&format!("cannot listen: {error}"));
             return ExitCode::FAILURE;
         }
     };
-    println!(
-        "purrdr-host-service {} listening on http://{} (WebSocket {WEBSOCKET_PATH}, herdr socket {})",
-        env!("CARGO_PKG_VERSION"),
-        service.local_addr(),
-        herdr_socket.native_name()
-    );
+    // 給人看的啟動訊息只在終端機輸出;log 檔裡已經有 start() 記的那一行。
+    if std::io::stdout().is_terminal() {
+        println!(
+            "purrdr-host-service {} listening on http://{} (WebSocket {WEBSOCKET_PATH}, herdr socket {})",
+            env!("CARGO_PKG_VERSION"),
+            service.local_addr(),
+            herdr_socket.native_name()
+        );
+    }
     if let Err(error) = crate::running_service::write(&state_directory, service.local_addr().port()) {
-        eprintln!("cannot write running.json: {error}");
+        log.record(&format!("cannot write running.json: {error}"));
     }
     // 安裝好的那份才會自動更新(開發中直接執行的不會)。
     let _auto_update = crate::auto_update::spawn_for_installed_service(herdr_socket);

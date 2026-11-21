@@ -77,6 +77,8 @@ pub struct HostStatus {
     pub herdr: HerdrStatus,
     /// 安裝紀錄的 `auto_update`;沒有安裝時 None。
     pub auto_update: Option<bool>,
+    /// 主機服務的 log 資料夾(`host-service.log`、`update.log` 都在這裡)。
+    pub log_directory: PathBuf,
 }
 
 impl std::fmt::Display for HostStatus {
@@ -87,6 +89,7 @@ impl std::fmt::Display for HostStatus {
         if let Some(auto_update) = self.auto_update {
             writeln!(formatter, "  auto update: {}", if auto_update { "on" } else { "off" })?;
         }
+        writeln!(formatter, "  logs: {}", self.log_directory.display())?;
         writeln!(formatter, "  listening on 127.0.0.1:{}: {}", self.port, yes_no(self.listening))?;
         if let Some(address) = &self.https_address {
             writeln!(formatter, "  HTTPS address: {address}")?;
@@ -821,6 +824,7 @@ impl<S: HostSystem> Installer<S> {
             serve,
             herdr: herdr_status(self.environment.platform, session.as_deref(), socket_environment).await,
             auto_update: auto_update_setting,
+            log_directory: layout.directory().join("logs"),
         }
     }
 

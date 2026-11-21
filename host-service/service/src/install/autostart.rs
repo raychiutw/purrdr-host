@@ -43,7 +43,7 @@ pub(super) fn register(system: &mut impl HostSystem, layout: &ServiceLayout, ser
     match layout.platform {
         InstallPlatform::MacOs => {
             let plist = registration_file(layout).expect("macOS 有 plist");
-            std::fs::write(&plist, launch_agent_plist(layout, &command_line)).map_err(InstallError::io)?;
+            std::fs::write(&plist, launch_agent_plist(&command_line)).map_err(InstallError::io)?;
             let domain = gui_domain(system)?;
             run_checked(system, "launchctl", &["bootstrap".into(), domain, plist.display().to_string()])
         }
@@ -178,12 +178,11 @@ fn run_checked(system: &mut impl HostSystem, program: &str, arguments: &[String]
     }
 }
 
-fn launch_agent_plist(layout: &ServiceLayout, command_line: &[String]) -> String {
+fn launch_agent_plist(command_line: &[String]) -> String {
     let program_arguments: String = command_line
         .iter()
         .map(|argument| format!("\n        <string>{}</string>", xml_escape(argument)))
         .collect();
-    let log = xml_escape(&layout.log_file().display().to_string());
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -198,10 +197,6 @@ fn launch_agent_plist(layout: &ServiceLayout, command_line: &[String]) -> String
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>StandardOutPath</key>
-    <string>{log}</string>
-    <key>StandardErrorPath</key>
-    <string>{log}</string>
 </dict>
 </plist>
 "#
@@ -228,6 +223,6 @@ fn systemd_unit(command_line: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "[Unit]\nDescription=Purrdr host service\n\n[Service]\nExecStart={exec_start}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Purrdr host service\n\n[Service]\nExecStart={exec_start}\nRestart=on-failure\nRestartSec=5\nStandardOutput=null\nStandardError=null\n\n[Install]\nWantedBy=default.target\n"
     )
 }

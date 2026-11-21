@@ -62,7 +62,7 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
     let devices = context.devices.clone();
     let device_id = device.device_id.clone();
     if let Err(error) = blocking(move || devices.record_connection(&device_id, SystemTime::now())).await {
-        eprintln!("cannot record connection: {error}");
+        context.log.record(&format!("cannot record connection: {error}"));
     }
     context.audit.record(
         AuditEvent::Connected {
@@ -98,7 +98,7 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         file_pacing: RequestPacing::default(),
         file_snapshot: None,
         push: context.push.clone(),
-        uploads: context.files.home.as_deref().map(UploadDirectory::under_home),
+        uploads: context.uploads.clone(),
         pending_uploads: HashMap::new(),
         service_management: context.service_management.clone(),
         devices: context.devices.clone(),

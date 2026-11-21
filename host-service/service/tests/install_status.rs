@@ -52,6 +52,20 @@ async fn status_after_install_reports_autostart_and_serve_on_every_platform() {
 }
 
 #[tokio::test]
+async fn status_tells_where_the_logs_are_on_every_platform() {
+    for platform in PLATFORMS {
+        let host = TestHost::new(platform);
+        let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+        installer.install(&host.options(reserved_port()), |_| true).unwrap();
+
+        let status = installer.status(&socket_environment_at("purrdr-status-test-missing-socket")).await;
+
+        let logs = host.service_directory().join("logs");
+        assert!(status.to_string().contains(&format!("  logs: {}\n", logs.display())), "{platform:?}: {status}");
+    }
+}
+
+#[tokio::test]
 async fn status_reports_running_service_and_herdr() {
     let herdr = FakeHerdr::start(vec![("ping", recorded("ping.ndjson"))]).await;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

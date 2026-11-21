@@ -29,6 +29,7 @@ mod push_plugin;
 pub mod protocol;
 pub mod remote_management;
 pub mod running_service;
+pub mod service_log;
 pub mod state_directory;
 mod structure_operations;
 mod text_format;
@@ -169,11 +170,18 @@ impl Drop for RunningHostService {
 pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostService> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port)).await?;
     let local_addr = listener.local_addr()?;
-    let upload_cleanup = config
-        .transcripts
-        .home
-        .as_deref()
-        .map(|home| uploads::spawn_cleanup(uploads::UploadDirectory::under_home(home), std::time::SystemTime::now));
+    let log = service_log::ServiceLog::under(&config.state_directory);
+    log.record(&format!("purrdr-host-service {} listening on http://{local_addr}", env!("CARGO_PKG_VERSION")));
+    // 新資料夾在暫存目錄底下;舊的家目錄資料夾只清理。
+    let uploads = config.temporary_directory.as_deref().map(uploads::UploadDirectory::under_temporary_directory);
+    let upload_cleanup = {
+        let directories: Vec<_> = uploads
+            .iter()
+            .cloned()
+            .chain(config.transcripts.home.as_deref().map(uploads::UploadDirectory::legacy_under_home))
+            .collect();
+        (!directories.is_empty()).then(|| uploads::spawn_cleanup(directories, log.clone(), std::time::SystemTime::now))
+    };
     let herdr = HerdrClient::new(config.herdr_socket);
     let observer = config.observer.map(|options| {
         let observer = agent_observer::AgentObserver::load(&config.state_directory);
@@ -187,7 +195,9 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         herdr_cli: config.herdr_cli,
         devices: DeviceStore::new(&config.state_directory),
         audit: AuditLog::new(&config.state_directory),
+        log: log.clone(),
         heartbeat: config.heartbeat,
+        uploads,
         files: host_files::FileAccessEnvironment {
             home: config.transcripts.home.clone(),
             temporary_directory: config.temporary_directory,
@@ -196,9 +206,10 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         transcripts: config.transcripts,
         service_management: config.service_management,
     });
+    let accept_log = log;
     let accept_loop = tokio::spawn(async move {
         if let Err(error) = axum::serve(listener, router).await {
-            eprintln!("host service stopped: {error}");
+            accept_log.record(&format!("host service stopped: {error}"));
         }
     });
     Ok(RunningHostService {

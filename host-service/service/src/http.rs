@@ -37,10 +37,14 @@ pub(crate) struct ServiceContext {
     pub herdr_cli: HerdrCli,
     pub devices: DeviceStore,
     pub audit: AuditLog,
+    /// 主機服務自己的 log(`logs/host-service.log`)。
+    pub log: crate::service_log::ServiceLog,
     pub heartbeat: Heartbeat,
     pub transcripts: TranscriptEnvironment,
     /// 主機取檔的家目錄、暫存目錄與主機服務資料夾。
     pub files: crate::host_files::FileAccessEnvironment,
+    /// 上傳資料夾(暫存目錄底下);拿不到暫存目錄時不能上傳。
+    pub uploads: Option<crate::uploads::UploadDirectory>,
     /// 推播外掛代裝(`~/.purrdr/push-*`)。
     pub push: crate::push_plugin::PushPlugin,
     /// 從 app 管理主機服務;None 時不能管理。
@@ -69,7 +73,7 @@ impl ServiceContext {
                 Err(ErrorCode::DeviceTokenRevoked)
             }
             Err(TokenRejection::Storage(error)) => {
-                eprintln!("cannot read device store: {error}");
+                self.log.record(&format!("cannot read device store: {error}"));
                 Err(ErrorCode::InternalError)
             }
         }
@@ -148,7 +152,7 @@ async fn pair(State(context): State<ServiceContext>, body: Bytes) -> Response {
             error_response(StatusCode::UNAUTHORIZED, ErrorCode::PairingCodeExpired, "pairing code expired")
         }
         Err(PairingFailure::Storage(error)) => {
-            eprintln!("cannot update device store: {error}");
+            context.log.record(&format!("cannot update device store: {error}"));
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::InternalError,
@@ -180,7 +184,7 @@ async fn revoke_self(State(context): State<ServiceContext>, headers: HeaderMap) 
         }
         Err(RevokeFailure::UnknownDevice) => token_error_response(ErrorCode::DeviceTokenInvalid),
         Err(RevokeFailure::Storage(error)) => {
-            eprintln!("cannot update device store: {error}");
+            context.log.record(&format!("cannot update device store: {error}"));
             token_error_response(ErrorCode::InternalError)
         }
     }

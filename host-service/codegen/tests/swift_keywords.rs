@@ -8,6 +8,7 @@ fn swift_for(definitions: serde_json::Value) -> String {
         "x-protocol-version": 1,
         "x-excluded-file-locations": [],
         "x-temporary-file-locations": [],
+        "x-upload-folder": "purrdr-uploads",
         "x-maximum-file-size": 1,
         "x-maximum-file-chunk": 1,
         "$defs": definitions
