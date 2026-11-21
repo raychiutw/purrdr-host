@@ -18,7 +18,7 @@ use crate::device_store::{DeviceStore, PAIRING_CODE_LIFETIME, RevokeFailure};
 use crate::herdr_socket::{Platform, SocketEnvironment};
 use crate::state_directory::resolve_state_directory;
 
-const USAGE: &str = "usage: purrdr-host-service pair [--read-only] [--address <https address>] [--wait] | devices | revoke <device id>  [--state-dir <dir>]";
+const USAGE: &str = "usage: purrdr pair [--read-only] [--address <https address>] [--wait] | devices | revoke <device id>  [--state-dir <dir>]";
 
 #[derive(Default)]
 struct Options {
@@ -152,7 +152,7 @@ fn devices(state_directory: &Path) -> Result<String, String> {
         .devices()
         .map_err(|error| format!("cannot read devices in {}: {error}", state_directory.display()))?;
     if devices.is_empty() {
-        return Ok("No paired devices. Run `purrdr-host-service pair` to add one.\n".to_owned());
+        return Ok("No paired devices. Run `purrdr pair` to add one.\n".to_owned());
     }
     let time = |time: SystemTime| humantime::format_rfc3339_seconds(time).to_string();
     let mut output = format!(
@@ -190,7 +190,7 @@ fn revoke(state_directory: &Path, device_id: &str, now: SystemTime) -> Result<St
                 device.device_id, device.name
             ))
         }
-        Err(RevokeFailure::UnknownDevice) => Err(format!("no device with id {device_id}; run `purrdr-host-service devices`")),
+        Err(RevokeFailure::UnknownDevice) => Err(format!("no device with id {device_id}; run `purrdr devices`")),
         Err(RevokeFailure::Storage(error)) => Err(format!("cannot update devices in {}: {error}", state_directory.display())),
     }
 }

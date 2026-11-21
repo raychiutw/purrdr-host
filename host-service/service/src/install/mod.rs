@@ -198,7 +198,7 @@ impl InstallCommand {
             "update" => Self::parse_update(options),
             "auto-update" => match options {
                 [switch] if switch == "on" || switch == "off" => Ok(InstallCommand::AutoUpdate { enabled: switch == "on" }),
-                _ => Err("usage: purrdr-host-service auto-update on|off".to_owned()),
+                _ => Err("usage: purrdr auto-update on|off".to_owned()),
             },
             _ => return None,
         };
