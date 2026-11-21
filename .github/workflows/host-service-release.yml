@@ -274,8 +274,19 @@ jobs:
             echo "Release $tag 已存在，不覆蓋;要重發請先遞增 host-service/service/Cargo.toml 的 version"
             exit 1
           fi
+          # 本版更新：取 host-service/CHANGELOG.md 裡 `## <版本>` 那一段;沒寫就略過，不擋發行。
+          changes="$(awk -v heading="## $VERSION" '$0 == heading { found = 1; next } found && /^## / { exit } found' host-service/CHANGELOG.md | sed '/./,$!d')"
+          if [ -n "$changes" ]; then
+            changes="$(printf '## 本版更新\n\n%s\n' "$changes")"
+          else
+            echo "::warning::host-service/CHANGELOG.md 沒有 $VERSION 的版本說明"
+          fi
           notes="$(cat <<EOF
-          Purrdr 主機服務 $VERSION。
+          Purrdr 主機服務 ${VERSION}。
+
+          $changes
+
+          ## 安裝
 
           **macOS／Linux**
           \`\`\`
