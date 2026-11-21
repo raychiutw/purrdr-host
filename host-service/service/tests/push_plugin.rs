@@ -1,9 +1,11 @@
-//! 推播外掛代裝(raychiutw/purrdr.host#10、raychiutw/purrdr.ios#261):`push.status`／`push.install`／`push.remove`。
+//! 推播外掛代裝(raychiutw/purrdr.host#10、raychiutw/purrdr.ios#261):`push.status`／`push.install`／`push.remove`;
+//! 測試通知 `push.test`(raychiutw/purrdr.host#60)對假後台(`install_support::push_backend`)送。
 //! 以真正的 WebSocket client 從協定這一端驗證，外部行為只看回應、家目錄的檔案與假 herdr CLI 收到的指令。
 //!
 //! 假的 herdr CLI 就是這支測試執行檔本身(`fake-herdr <資料夾>` 參數):`installed` 存在代表已安裝 purrdr.push,
 //! `install-fails`／`list-fails` 存在時對應指令失敗，每次呼叫的參數記在 `calls`。所以不用 libtest(`harness = false`)。
 
+mod install_support;
 mod support;
 
 use std::collections::BTreeMap;
@@ -12,6 +14,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use install_support::push_backend::FakePushBackend;
 use purrdr_host_service::herdr_cli::HerdrCli;
 use serde_json::{Value, json};
 use support::{FakeHerdr, TestClient, TestHostService, recorded, start_service_with_herdr_cli_and_home};
@@ -129,6 +132,13 @@ impl Harness {
 
     fn mark(&self, name: &str) {
         std::fs::write(self.fake.path().join(name), b"").unwrap();
+    }
+
+    /// 直接寫一支裝置的配對檔(endpoint 指向假後台，是 http,所以不經 push.install)。
+    fn write_pairing(&self, device_id: &str, endpoint: &str, key: &str) {
+        let directory = self.home.path().join(format!(".purrdr/push-{device_id}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("pairing"), format!("purrdr-push 1\nendpoint={endpoint}\nkey={key}\n")).unwrap();
     }
 
     fn home_file(&self, relative: &str) -> Option<String> {
@@ -471,6 +481,126 @@ async fn update_muted_rejects_multiline_sessions_and_read_only_devices() {
     assert_eq!(harness.home_snapshot(), paired);
 }
 
+// MARK: - 測試通知(push.test,#60)
+
+const OTHER_KEY: &str = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
+
+fn push_test(device_id: &str) -> Value {
+    json!({"type": "push.test", "request_id": "t1", "device_id": device_id})
+}
+
+async fn push_test_sends_one_test_event_to_this_device_only() {
+    let harness = Harness::start().await;
+    let backend = FakePushBackend::start();
+    harness.write_pairing("phone-a", &backend.endpoint(), KEY);
+    harness.write_pairing("tablet-b", &backend.endpoint(), OTHER_KEY);
+    let mut client = harness.client().await;
+
+    let reply = client.request(push_test("phone-a")).await;
+
+    assert_eq!(reply, json!({"type": "push.test.result", "request_id": "t1"}));
+    assert_eq!(backend.bodies(), vec![json!({"key": KEY, "event": "test"})]);
+    assert!(harness.calls().is_empty(), "不經過 herdr:{:?}", harness.calls());
+}
+
+async fn push_test_forwards_the_host_name_shown_in_the_app() {
+    let harness = Harness::start().await;
+    let backend = FakePushBackend::start();
+    harness.write_pairing("phone-a", &backend.endpoint(), KEY);
+    let mut client = harness.client().await;
+    let mut named = push_test("phone-a");
+    named["host_name"] = json!("Studio Mac");
+    let mut multiline = push_test("phone-a");
+    multiline["host_name"] = json!("Studio\nMac");
+    let mut too_long = push_test("phone-a");
+    too_long["host_name"] = json!("x".repeat(65));
+
+    let reply = client.request(named).await;
+    let rejected = [client.request(multiline).await, client.request(too_long).await];
+
+    assert_eq!(reply["type"], "push.test.result", "{reply}");
+    assert_eq!(backend.bodies(), vec![json!({"key": KEY, "event": "test", "host_name": "Studio Mac"})]);
+    for rejected in rejected {
+        assert_eq!(rejected["code"], "invalid_message", "{rejected}");
+    }
+}
+
+async fn push_test_without_a_pairing_the_backend_knows_reports_not_paired() {
+    let harness = Harness::start().await;
+    let backend = FakePushBackend::start();
+    let mut client = harness.client().await;
+
+    let unpaired = client.request(push_test("phone-a")).await;
+    harness.write_pairing("phone-a", &backend.endpoint(), KEY);
+    backend.respond_to_key_with(KEY, 404, r#"{"error":{"code":"pairing_not_found","message":"No such pairing."}}"#);
+    let unknown = client.request(push_test("phone-a")).await;
+    let kept = harness.home_file(".purrdr/push-phone-a/pairing");
+    backend.respond_to_key(KEY, 410);
+    let revoked = client.request(push_test("phone-a")).await;
+
+    assert_eq!(unpaired["code"], "push_not_paired", "{unpaired}");
+    assert_eq!(unknown["code"], "push_not_paired", "{unknown}");
+    assert!(kept.is_some(), "後台回 404 不刪本機配對");
+    assert_eq!(revoked["code"], "push_not_paired", "{revoked}");
+    assert!(!harness.home.path().join(".purrdr/push-phone-a").exists(), "後台回 410 刪掉這組配對");
+}
+
+async fn push_test_backend_failures_carry_the_backend_error_code() {
+    let harness = Harness::start().await;
+    let backend = FakePushBackend::start();
+    harness.write_pairing("phone-a", &backend.endpoint(), KEY);
+    let mut client = harness.client().await;
+
+    backend.respond_to_key_with(KEY, 403, r#"{"error":{"code":"subscription_required","message":"Needs Plus."}}"#);
+    let subscription = client.request(push_test("phone-a")).await;
+    backend.respond_to_key_with(KEY, 500, "oops");
+    let server_error = client.request(push_test("phone-a")).await;
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    harness.write_pairing("phone-a", &format!("http://{closed}/v1/push"), KEY);
+    let unreachable = client.request(push_test("phone-a")).await;
+
+    assert_eq!(subscription["code"], "push_send_failed", "{subscription}");
+    assert_eq!(subscription["message"], "subscription_required");
+    assert_eq!(server_error["code"], "push_send_failed", "{server_error}");
+    assert_eq!(server_error["message"], "http 500");
+    assert_eq!(unreachable["code"], "push_send_failed", "{unreachable}");
+    for reply in [&subscription, &server_error, &unreachable] {
+        assert!(!reply.to_string().contains(KEY), "{reply}");
+    }
+    assert!(harness.home_file(".purrdr/push-phone-a/pairing").is_some(), "送不出去不刪配對");
+}
+
+async fn push_test_does_not_follow_redirects_with_the_key() {
+    let harness = Harness::start().await;
+    let backend = FakePushBackend::start();
+    harness.write_pairing("phone-a", &backend.endpoint(), KEY);
+    backend.respond_to_key_with(KEY, 307, "");
+    let mut client = harness.client().await;
+
+    let reply = client.request(push_test("phone-a")).await;
+
+    assert_eq!(reply["code"], "push_send_failed", "{reply}");
+    assert_eq!(reply["message"], "http 307");
+    assert_eq!(backend.bodies().len(), 1, "沒有把密鑰再送到轉址的目的地");
+}
+
+async fn push_test_is_refused_for_read_only_devices_and_audited_without_the_key() {
+    let harness = Harness::start().await;
+    let backend = FakePushBackend::start();
+    harness.write_pairing("phone-a", &backend.endpoint(), KEY);
+    let mut read_only = harness.read_only_client().await;
+    let mut client = harness.client().await;
+
+    let refused = read_only.request(push_test("phone-a")).await;
+    client.request(push_test("phone-a")).await;
+
+    assert_eq!(refused["code"], "read_only_device", "{refused}");
+    assert_eq!(backend.bodies().len(), 1, "唯讀裝置的請求沒有送到後台");
+    let audit = harness.service.audit_log();
+    assert!(audit.contains("push.test"), "{audit}");
+    assert!(!audit.contains(KEY), "{audit}");
+}
+
 // MARK: - 執行
 
 type TestCase = (&'static str, fn() -> Pin<Box<dyn Future<Output = ()>>>);
@@ -525,6 +655,24 @@ fn tests() -> Vec<TestCase> {
         }),
         ("install_and_remove_are_audited_without_the_key", || {
             Box::pin(install_and_remove_are_audited_without_the_key())
+        }),
+        ("push_test_sends_one_test_event_to_this_device_only", || {
+            Box::pin(push_test_sends_one_test_event_to_this_device_only())
+        }),
+        ("push_test_forwards_the_host_name_shown_in_the_app", || {
+            Box::pin(push_test_forwards_the_host_name_shown_in_the_app())
+        }),
+        ("push_test_without_a_pairing_the_backend_knows_reports_not_paired", || {
+            Box::pin(push_test_without_a_pairing_the_backend_knows_reports_not_paired())
+        }),
+        ("push_test_backend_failures_carry_the_backend_error_code", || {
+            Box::pin(push_test_backend_failures_carry_the_backend_error_code())
+        }),
+        ("push_test_does_not_follow_redirects_with_the_key", || {
+            Box::pin(push_test_does_not_follow_redirects_with_the_key())
+        }),
+        ("push_test_is_refused_for_read_only_devices_and_audited_without_the_key", || {
+            Box::pin(push_test_is_refused_for_read_only_devices_and_audited_without_the_key())
         }),
     ]
 }

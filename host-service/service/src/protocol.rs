@@ -76,6 +76,8 @@ pub enum ClientMessage {
     PushRemove(PushRemove),
     #[serde(rename = "push.update_muted")]
     PushUpdateMuted(PushUpdateMuted),
+    #[serde(rename = "push.test")]
+    PushTest(PushTest),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreate),
     #[serde(rename = "workspace.rename")]
@@ -121,7 +123,7 @@ pub enum ClientMessage {
 impl ClientMessage {
     /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
     pub fn is_write(&self) -> bool {
-        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_) | ClientMessage::QueueAdd(_) | ClientMessage::QueueRemove(_) | ClientMessage::QueueReorder(_))
+        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::PushTest(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_) | ClientMessage::QueueAdd(_) | ClientMessage::QueueRemove(_) | ClientMessage::QueueReorder(_))
     }
 }
 
@@ -183,6 +185,8 @@ pub enum ServerMessage {
     PushRemoveResult(PushRemoveResult),
     #[serde(rename = "push.update_muted.result")]
     PushUpdateMutedResult(PushUpdateMutedResult),
+    #[serde(rename = "push.test.result")]
+    PushTestResult(PushTestResult),
     #[serde(rename = "workspace.create.result")]
     WorkspaceCreateResult(WorkspaceCreateResult),
     #[serde(rename = "workspace.rename.result")]
@@ -495,6 +499,9 @@ pub struct TranscriptWindow {
     pub path: String,
     pub end: i64,
     pub lines: i64,
+    /// byte 上限(raychiutw/purrdr.host#52,0.11.0 起;app 打開聊天的短載入):只取 end 往前 max_bytes bytes 內完整的行，不放大範圍，所以回應的行數可能少於 lines;最後一行就比上限大時範圍是空的(start == end,由 app 決定要不要放寬)。同 SSH 視窗腳本的第五個參數。沒帶時照舊只依行數。0 或負數回 invalid_message。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<i64>,
 }
 
 /// 視窗的 byte 範圍與範圍內的行。
@@ -1309,6 +1316,23 @@ pub struct PushUpdateMutedResult {
     pub other_devices: i64,
 }
 
+/// 送一則測試通知給這支裝置(raychiutw/purrdr.host#60,0.11.0 起):讀這支裝置的推播配對，對它的 endpoint 送 {key, event: test, host_name?}(後台 raychiutw/purrdr.server#19 組固定內容的通知，不受推播種類偏好影響、不去重)。只送給這支裝置，不經過主機外掛與 herdr。沒有配對、後台回 404 或 410 都回 push_not_paired(410 時刪掉這組配對，期間重新配對的不刪);連不上或後台回其他狀態碼回 push_send_failed。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushTest {
+    pub request_id: String,
+    /// 同 push.install 的 device_id。
+    pub device_id: String,
+    /// app 主機清單上這台主機的名稱，轉給後台放進通知標題(「Test: <名稱> needs you」)。1–64 個字(同後台的上限)、不含控制字元，不合格回 invalid_message;沒帶時不送，後台用預設標題。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_name: Option<String>,
+}
+
+/// 後台已接受測試通知(回 2xx)。實際送達由 APNs 決定。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushTestResult {
+    pub request_id: String,
+}
+
 /// 上傳圖片或檔案(raychiutw/purrdr.host#16):開始一次分塊上傳。主機服務在系統暫存目錄底下的上傳資料夾(x-upload-folder)建暫存檔，檔名由主機服務產生(不採用 app 給的名稱),超過 7 天的上傳檔定期刪除。size 超過 x-maximum-file-size 回 upload_too_large。中繼資料剝除在 app 端做，主機服務不解析內容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileUploadStart {
@@ -1501,7 +1525,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted 時這支裝置在這台主機沒有推播配對;device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;queue_full:這個 pane 的 Send When Done 佇列已有 20 則;queue_item_unknown:queue.remove／queue.reorder 的 item_id 不在佇列裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted／push.test 時這支裝置在這台主機沒有推播配對(push.test 另含後台回 404／410);push_send_failed:push.test 連不上後台或後台回其他狀態碼(message 是後台的錯誤碼，例如 subscription_required、rate_limited、apns_failed;沒有錯誤碼時是 http <狀態碼> 或連線錯誤);device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;queue_full:這個 pane 的 Send When Done 佇列已有 20 則;queue_item_unknown:queue.remove／queue.reorder 的 item_id 不在佇列裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
@@ -1544,6 +1568,8 @@ pub enum ErrorCode {
     PushPluginFailed,
     #[serde(rename = "push_not_paired")]
     PushNotPaired,
+    #[serde(rename = "push_send_failed")]
+    PushSendFailed,
     #[serde(rename = "upload_too_large")]
     UploadTooLarge,
     #[serde(rename = "device_unknown")]

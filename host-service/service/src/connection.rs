@@ -31,9 +31,9 @@ use crate::protocol::{
     Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, DevicesListResult, DevicesRevokeResult, ErrorCode,
     ErrorMessage, EventsEnded, EventsSubscribe, EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus,
     FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, GitDiff, GitDiffResult, GitStatus, GitStatusResult, HerdrServer,
-    PROTOCOL_VERSION, PairedDevice, PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult, QueueAdd,
-    QueueAddResult, QueueList, QueueListResult, QueueRemove, QueueRemoveResult, QueueReorder, QueueReorderResult, ServerMessage, SessionsList,
-    SessionsListResult, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
+    PROTOCOL_VERSION, PairedDevice, PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult,
+    PushTestResult, QueueAdd, QueueAddResult, QueueList, QueueListResult, QueueRemove, QueueRemoveResult, QueueReorder, QueueReorderResult, ServerMessage,
+    SessionsList, SessionsListResult, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
 use crate::remote_management::{self, ServiceManagement};
@@ -200,6 +200,7 @@ fn requires_handshake(message: &ClientMessage) -> bool {
             | ClientMessage::PushInstall(_)
             | ClientMessage::PushUpdateMuted(_)
             | ClientMessage::PushRemove(_)
+            | ClientMessage::PushTest(_)
     )
 }
 
@@ -402,6 +403,9 @@ impl ClientConnection {
                 push_reply(request.request_id, outcome, PushState::muted_result)
             }
             ClientMessage::PushRemove(request) => push_reply(request.request_id, self.push.unpair(&request.device_id).await, PushState::unpaired_result),
+            ClientMessage::PushTest(request) => {
+                push_test_reply(request.request_id, self.push.send_test(&request.device_id, request.host_name.as_deref()).await)
+            }
             ClientMessage::WorkspaceCreate(request) => structure_operations::workspace_create(&self.herdr, request).await,
             ClientMessage::WorkspaceRename(request) => structure_operations::workspace_rename(&self.herdr, request).await,
             ClientMessage::WorkspaceClose(request) => structure_operations::workspace_close(&self.herdr, request).await,
@@ -1218,11 +1222,27 @@ fn error_message(request_id: Option<String>, code: ErrorCode, message: &str) -> 
 fn push_reply(request_id: String, outcome: Result<PushState, PushFailure>, result: impl FnOnce(String, PushState) -> ServerMessage) -> ServerMessage {
     match outcome {
         Ok(state) => result(request_id, state),
-        Err(PushFailure::InvalidRequest(message)) => error(Some(request_id), ErrorCode::InvalidMessage, message),
-        Err(PushFailure::HerdrUnavailable(message)) => error(Some(request_id), ErrorCode::HerdrUnavailable, &message),
-        Err(PushFailure::Herdr(message)) => error(Some(request_id), ErrorCode::PushPluginFailed, &message),
-        Err(PushFailure::NotPaired) => error(Some(request_id), ErrorCode::PushNotPaired, "this device has no push pairing on this host"),
-        Err(PushFailure::Internal(message)) => error(Some(request_id), ErrorCode::InternalError, &message),
+        Err(failure) => push_error(request_id, failure),
+    }
+}
+
+/// 推播請求失敗的錯誤回應。
+fn push_error(request_id: String, failure: PushFailure) -> ServerMessage {
+    match failure {
+        PushFailure::InvalidRequest(message) => error(Some(request_id), ErrorCode::InvalidMessage, message),
+        PushFailure::HerdrUnavailable(message) => error(Some(request_id), ErrorCode::HerdrUnavailable, &message),
+        PushFailure::Herdr(message) => error(Some(request_id), ErrorCode::PushPluginFailed, &message),
+        PushFailure::NotPaired => error(Some(request_id), ErrorCode::PushNotPaired, "this device has no push pairing on this host"),
+        PushFailure::SendFailed(message) => error(Some(request_id), ErrorCode::PushSendFailed, &message),
+        PushFailure::Internal(message) => error(Some(request_id), ErrorCode::InternalError, &message),
+    }
+}
+
+/// 測試通知的結果轉成回應或錯誤。
+fn push_test_reply(request_id: String, outcome: Result<(), PushFailure>) -> ServerMessage {
+    match outcome {
+        Ok(()) => ServerMessage::PushTestResult(PushTestResult { request_id }),
+        Err(failure) => push_error(request_id, failure),
     }
 }
 

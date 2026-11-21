@@ -275,6 +275,100 @@ async fn window_grows_its_chunk_until_it_has_enough_lines() {
     assert_eq!(reply["end"], content.len());
 }
 
+fn window_with_max_bytes(request_id: &str, path: &str, end: u64, lines: u64, max_bytes: u64) -> Value {
+    let mut request = window(request_id, path, end, lines);
+    request["max_bytes"] = json!(max_bytes);
+    request
+}
+
+/// `n` 行，每行 20 bytes(含換行)。
+fn twenty_byte_lines(count: usize) -> String {
+    (0..count).map(|index| format!("{{\"n\":{index:05},\"ppp\":1}}\n")).collect()
+}
+
+#[tokio::test]
+async fn window_with_max_bytes_returns_only_complete_lines_within_that_many_bytes() {
+    let fixture = Fixture::recorded_snapshot().await;
+    let content = twenty_byte_lines(100);
+    assert_eq!(content.len(), 2000);
+    let transcript = fixture.claude_transcript(&content);
+    let mut client = fixture.client().await;
+    client.request(locate("r1", "id", CLAUDE_SESSION)).await;
+    let path = path_text(&transcript);
+
+    let within = client.request(window_with_max_bytes("r2", &path, 2000, 40, 65)).await;
+    let fewer_lines = client.request(window_with_max_bytes("r3", &path, 2000, 2, 65)).await;
+
+    // 最後 65 bytes 裡第一段是被切斷的行，不算:剩 3 行完整的行(60 bytes),少於要求的 40 行。
+    assert_eq!(within["start"], 1940, "{within}");
+    assert_eq!(within["end"], 2000);
+    let texts: Vec<&str> = within["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| record["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, ["{\"n\":00097,\"ppp\":1}", "{\"n\":00098,\"ppp\":1}", "{\"n\":00099,\"ppp\":1}"]);
+    assert_eq!(fewer_lines["start"], 1960, "{fewer_lines}");
+    assert_eq!(fewer_lines["records"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn window_with_max_bytes_smaller_than_the_last_line_is_empty() {
+    let fixture = Fixture::recorded_snapshot().await;
+    let content = twenty_byte_lines(3);
+    let transcript = fixture.claude_transcript(&content);
+    let mut client = fixture.client().await;
+    client.request(locate("r1", "id", CLAUDE_SESSION)).await;
+
+    let reply = client.request(window_with_max_bytes("r2", &path_text(&transcript), 60, 40, 10)).await;
+    let zero = client.request(window_with_max_bytes("r3", &path_text(&transcript), 60, 40, 0)).await;
+
+    // 一行都放不下：範圍是空的(start == end,app 再以 lines: 1 放寬)。
+    assert_eq!(reply["records"], json!([]), "{reply}");
+    assert_eq!(reply["start"], reply["end"]);
+    assert_eq!(reply["end"], 60);
+    assert_eq!(zero["code"], "invalid_message", "{zero}");
+}
+
+#[tokio::test]
+async fn window_with_max_bytes_keeps_a_line_that_exactly_fits() {
+    let fixture = Fixture::recorded_snapshot().await;
+    let content = "{\"a\":1}\n{\"bb\":2}\n";
+    let transcript = fixture.claude_transcript(content);
+    let mut client = fixture.client().await;
+    client.request(locate("r1", "id", CLAUDE_SESSION)).await;
+
+    // 上限剛好是最後一行(含換行)的長度：範圍起點前一個 byte 是換行，第一段就是完整的行。
+    let reply = client
+        .request(window_with_max_bytes("r2", &path_text(&transcript), content.len() as u64, 40, 9))
+        .await;
+
+    assert_eq!(reply["records"], json!([{"length": 8, "text": "{\"bb\":2}"}]), "{reply}");
+    assert_eq!(reply["start"], 8);
+}
+
+#[tokio::test]
+async fn window_with_max_bytes_does_not_grow_past_the_limit() {
+    let fixture = Fixture::recorded_snapshot().await;
+    let content: String = (0..2000)
+        .map(|index| format!("{{\"line\":{index:05},\"pad\":\"{}\"}}\n", "x".repeat(4000)))
+        .collect();
+    let transcript = fixture.claude_transcript(&content);
+    let mut client = fixture.client().await;
+    client.request(locate("r1", "id", CLAUDE_SESSION)).await;
+
+    let reply = client
+        .request(window_with_max_bytes("r2", &path_text(&transcript), content.len() as u64, 1500, 65_536))
+        .await;
+
+    let records = reply["records"].as_array().unwrap();
+    let total: u64 = records.iter().map(|record| record["length"].as_u64().unwrap() + 1).sum();
+    assert!(total <= 65_536, "{total}");
+    assert_eq!(records.len(), 16, "65536 bytes 放得下 16 行 4024 bytes 的行");
+    assert_eq!(reply["end"], content.len());
+}
+
 #[tokio::test]
 async fn window_refuses_paths_this_connection_did_not_locate() {
     let fixture = Fixture::recorded_snapshot().await;

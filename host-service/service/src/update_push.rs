@@ -22,6 +22,8 @@ impl Default for HttpPushTransport {
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(10)))
             .http_status_as_error(false)
+            // 不跟隨轉址：配對密鑰在本文裡，不能被轉送到別的主機。
+            .max_redirects(0)
             .user_agent(concat!("purrdr-host-service/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
@@ -29,14 +31,32 @@ impl Default for HttpPushTransport {
     }
 }
 
-impl PushTransport for HttpPushTransport {
-    fn post_json(&mut self, endpoint: &str, body: &str) -> Result<u16, String> {
-        self.agent
+/// 測試通知讀回應本文的上限(後台的錯誤本文很短)。
+const MAXIMUM_REPLY_BYTES: u64 = 4096;
+
+impl HttpPushTransport {
+    /// 送一則推播，回狀態碼與本文(最多 `MAXIMUM_REPLY_BYTES`,讀不了是空字串);連不上時回錯誤。
+    pub(crate) fn post_json_with_reply(&mut self, endpoint: &str, body: &str) -> Result<(u16, String), String> {
+        let mut response = self
+            .agent
             .post(endpoint)
             .header("Content-Type", "application/json")
             .send(body)
-            .map(|response| response.status().as_u16())
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let status = response.status().as_u16();
+        let reply = response
+            .body_mut()
+            .with_config()
+            .limit(MAXIMUM_REPLY_BYTES)
+            .read_to_string()
+            .unwrap_or_default();
+        Ok((status, reply))
+    }
+}
+
+impl PushTransport for HttpPushTransport {
+    fn post_json(&mut self, endpoint: &str, body: &str) -> Result<u16, String> {
+        self.post_json_with_reply(endpoint, body).map(|(status, _)| status)
     }
 }
 
@@ -151,7 +171,7 @@ pub(crate) struct Pairing {
 }
 
 impl Pairing {
-    fn read(directory: &Path) -> Option<Pairing> {
+    pub(crate) fn read(directory: &Path) -> Option<Pairing> {
         let credentials = PairingCredentials::parse(&std::fs::read_to_string(directory.join("pairing")).ok()?)?;
         if credentials.endpoint.is_empty() || credentials.key.is_empty() {
             return None;
