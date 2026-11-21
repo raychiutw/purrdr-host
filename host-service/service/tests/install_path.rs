@@ -126,7 +126,7 @@ fn installed_message_says_to_open_a_new_terminal_unless_no_path() {
     };
     let skipped = installer.install(&without_path, |_| true).unwrap().to_string();
 
-    let hint = "open a new terminal to run purrdr-host-service directly";
+    let hint = "open a new terminal to run purrdr directly";
     assert!(with_path.contains(hint), "{with_path}");
     assert!(!skipped.contains(hint), "{skipped}");
 }

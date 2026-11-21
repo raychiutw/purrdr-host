@@ -37,8 +37,22 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
     if let Err(error) = crate::running_service::write(&state_directory, service.local_addr().port()) {
         log.record(&format!("cannot write running.json: {error}"));
     }
+    repair_command_alias(&log);
     // 安裝好的那份才會自動更新(開發中直接執行的不會)。
     let _auto_update = crate::auto_update::spawn_for_installed_service(herdr_socket);
     service.wait().await;
     ExitCode::SUCCESS
+}
+
+/// 安裝好的那份啟動時補上指令別名 `purrdr`;沒補成只記 log,不影響服務。
+fn repair_command_alias(log: &crate::service_log::ServiceLog) {
+    use crate::install::{CommandAlias, HostEnvironment, InstalledService, system::ProcessHostSystem};
+    let Ok(environment) = HostEnvironment::from_process() else {
+        return;
+    };
+    match InstalledService::new(environment, ProcessHostSystem).repair_command_alias() {
+        Some(Ok(CommandAlias::Taken(file))) => log.record(&format!("the purrdr command was not added: {} already exists", file.display())),
+        Some(Err(error)) => log.record(&format!("the purrdr command was not added: {error}")),
+        _ => {}
+    }
 }

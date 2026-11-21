@@ -76,6 +76,13 @@ impl<S: HostSystem> InstalledService<S> {
         self.record().is_ok() && running_from.is_some() && running_from == bin.canonicalize().ok()
     }
 
+    /// 安裝好的那份啟動時補上指令別名 `purrdr`(靠自動更新升級的主機不會重跑安裝，raychiutw/purrdr.host#53);
+    /// 從別處執行時不動，回 None。
+    pub fn repair_command_alias(&self) -> Option<Result<super::CommandAlias, String>> {
+        self.runs_installed_copy()
+            .then(|| super::command_alias::ensure(&self.layout()).map_err(|error| error.to_string()))
+    }
+
     /// 執行安裝好的 `update --yes` 的啟動器。
     pub fn update_launcher(&self) -> HelperLauncher {
         HelperLauncher::new(self.layout().executable(), "systemd-run".to_owned())
