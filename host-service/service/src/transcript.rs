@@ -183,9 +183,11 @@ pub struct Chunk {
 const WINDOW_CHUNK_BYTES: u64 = 4 << 20;
 
 /// 以 `end` 為終點往前取恰好 `lines` 行完整的行;終點是 `end` 之前最後一個換行之後(未完成的行留給追蹤)。
-pub fn window(path: &Path, end: u64, lines: usize) -> Result<Chunk, TranscriptFailure> {
+///
+/// `max_bytes` 有值時(#52)只看 `end` 往前那麼多 bytes,不放大區塊：行數可能不夠，最後一行就比上限大時範圍是空的。
+pub fn window(path: &Path, end: u64, lines: usize, max_bytes: Option<u64>) -> Result<Chunk, TranscriptFailure> {
     let mut file = File::open(path).map_err(|_| TranscriptFailure::Unreadable)?;
-    let mut chunk_bytes = WINDOW_CHUNK_BYTES;
+    let mut chunk_bytes = max_bytes.unwrap_or(WINDOW_CHUNK_BYTES);
     loop {
         let chunk_start = end.saturating_sub(chunk_bytes);
         let bytes = read_range(&mut file, chunk_start, end)?;
@@ -203,7 +205,7 @@ pub fn window(path: &Path, end: u64, lines: usize) -> Result<Chunk, TranscriptFa
             line_start = index + 1;
             complete_end = index + 1;
         }
-        if line_starts.len() < lines && chunk_start > 0 {
+        if line_starts.len() < lines && chunk_start > 0 && max_bytes.is_none() {
             chunk_bytes *= 4;
             continue;
         }

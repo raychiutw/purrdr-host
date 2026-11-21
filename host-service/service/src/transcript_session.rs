@@ -141,8 +141,13 @@ impl TranscriptSession {
         if lines == 0 {
             return invalid(request.request_id, "lines must be positive");
         }
+        let max_bytes = match request.max_bytes.map(u64::try_from) {
+            None => None,
+            Some(Ok(max_bytes)) if max_bytes > 0 => Some(max_bytes),
+            Some(_) => return invalid(request.request_id, "max_bytes must be positive"),
+        };
         let path = PathBuf::from(&request.path);
-        match blocking(move || transcript::window(&path, end, lines)).await {
+        match blocking(move || transcript::window(&path, end, lines, max_bytes)).await {
             Ok(chunk) => ServerMessage::TranscriptWindowResult(TranscriptWindowResult {
                 request_id: request.request_id,
                 start: chunk.start as i64,

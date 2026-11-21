@@ -1103,12 +1103,15 @@ extension HostServiceProtocol {
         public var path: String
         public var end: Int
         public var lines: Int
+        /// byte 上限(raychiutw/purrdr.host#52,0.11.0 起;app 打開聊天的短載入):只取 end 往前 max_bytes bytes 內完整的行，不放大範圍，所以回應的行數可能少於 lines;最後一行就比上限大時範圍是空的(start == end,由 app 決定要不要放寬)。同 SSH 視窗腳本的第五個參數。沒帶時照舊只依行數。0 或負數回 invalid_message。
+        public var maxBytes: Int?
 
-        public init(requestId: String, path: String, end: Int, lines: Int) {
+        public init(requestId: String, path: String, end: Int, lines: Int, maxBytes: Int? = nil) {
             self.requestId = requestId
             self.path = path
             self.end = end
             self.lines = lines
+            self.maxBytes = maxBytes
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -1116,6 +1119,7 @@ extension HostServiceProtocol {
             case path
             case end
             case lines
+            case maxBytes = "max_bytes"
         }
     }
 }
