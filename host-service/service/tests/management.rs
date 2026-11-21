@@ -156,6 +156,18 @@ fn revoke_unknown_device_fails() {
     let error = run("revoke 0000000000000000", state_directory.path()).unwrap_err();
 
     assert!(error.contains("0000000000000000"), "{error}");
+    assert!(error.contains("run `purrdr devices`"), "提示用指令別名(#53):{error}");
+}
+
+#[test]
+fn messages_suggest_the_short_purrdr_command() {
+    let state_directory = tempfile::tempdir().unwrap();
+
+    let devices = run("devices", state_directory.path()).unwrap();
+    let usage = run("revoke", state_directory.path()).unwrap_err();
+
+    assert!(devices.contains("Run `purrdr pair` to add one"), "{devices}");
+    assert!(usage.starts_with("usage: purrdr pair"), "{usage}");
 }
 
 #[test]
