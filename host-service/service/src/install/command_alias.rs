@@ -25,14 +25,15 @@ pub enum CommandAlias {
 /// Windows `purrdr.cmd` 的第一行：有這行的就是我們放的(內容不同時重寫，讓之後的版本能換掉它)。
 const WINDOWS_MARKER: &str = "@rem purrdr-host-service command alias";
 
-/// Windows 的別名內容。沒帶參數時印出可用指令(只打 `purrdr` 不該在前景啟動服務)。
-/// 每行都在同一行裡 `exit /b`:cmd.exe 執行完不再回頭讀檔，`purrdr uninstall` 刪掉 `bin/` 後才不會出現
-/// "The batch file cannot be found"。
+/// Windows 的別名內容。沒帶參數時印出可用指令並以 2 結束(只打 `purrdr` 不該在前景啟動服務)。
+/// 最後一行直接執行 exe、不接 `& exit /b`:不帶結束碼的 `exit /b` 會把錯誤碼蓋成 0。
+/// `purrdr uninstall` 刪掉 `bin/` 後 cmd.exe 可能印出 "The batch file cannot be found",
+/// 在 Windows PC 實測同一行接 `exit /b`、`call exit` 或 `if errorlevel` 都避不掉，只能接受。
 fn windows_script(executable_name: &str) -> String {
     format!(
         "{WINDOWS_MARKER}\r\n\
          @if \"%~1\"==\"\" \"%~dp0{executable_name}\" help & exit /b 2\r\n\
-         @\"%~dp0{executable_name}\" %* & exit /b\r\n"
+         @\"%~dp0{executable_name}\" %*\r\n"
     )
 }
 
