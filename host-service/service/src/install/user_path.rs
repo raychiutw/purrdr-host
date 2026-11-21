@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use super::system::HostSystem;
 use super::{InstallError, InstallPlatform, ServiceLayout};
 
-const BLOCK_START: &str = "# >>> purrdr-host-service >>>";
-const BLOCK_END: &str = "# <<< purrdr-host-service <<<";
+pub(super) const BLOCK_START: &str = "# >>> purrdr-host-service >>>";
+pub(super) const BLOCK_END: &str = "# <<< purrdr-host-service <<<";
 
 /// 安裝對 PATH 做的變更，解除安裝依它還原。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +116,7 @@ fn remove_shell_block(layout: &ServiceLayout, change: &mut PathChange) -> Result
     Ok(())
 }
 
-fn read_if_exists(file: &Path) -> Result<Option<String>, InstallError> {
+pub(super) fn read_if_exists(file: &Path) -> Result<Option<String>, InstallError> {
     match std::fs::read_to_string(file) {
         Ok(contents) => Ok(Some(contents)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -140,7 +140,7 @@ fn path_block(bin: &str, fish: bool) -> String {
 }
 
 /// 去掉標記區塊：只移除開始與結束標記都在的區塊(結束標記配最近的開始標記);缺結束標記時整段保留。
-fn without_block(contents: &str) -> String {
+pub(super) fn without_block(contents: &str) -> String {
     let lines: Vec<&str> = contents.split_inclusive('\n').collect();
     let mut removed = vec![false; lines.len()];
     let mut open_block: Option<usize> = None;

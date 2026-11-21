@@ -37,11 +37,22 @@ fn run_management(arguments: &[String]) -> ExitCode {
     match management::run(arguments, Platform::current(), &SocketEnvironment::from_process(), SystemTime::now()) {
         Ok(output) => {
             print!("{output}");
+            wait_for_enter_if_asked(arguments);
             ExitCode::SUCCESS
         }
         Err(message) => {
             eprintln!("{message}");
+            wait_for_enter_if_asked(arguments);
             ExitCode::from(2)
         }
+    }
+}
+
+/// `pair --wait`:herdr 的 popup 在指令結束時就關掉，成功或失敗都等使用者按 Enter,讓 QR code 或錯誤留在畫面上。
+fn wait_for_enter_if_asked(arguments: &[String]) {
+    use std::io::Write as _;
+    if management::waits_for_enter(arguments) {
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stdin().read_line(&mut String::new());
     }
 }

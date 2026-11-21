@@ -26,6 +26,8 @@ sha2 = "0.11.1"
 subtle = "2.6.1"
 tar = "0.4.46"
 tokio = { workspace = true, features = ["process"] }
+# 安裝時檢查 herdr config.toml:按鍵是否已被占用、加上快捷鍵後是否仍是合法 TOML。
+toml = "1.2.1"
 # 更新：向 GitHub Release 取版本與下載(rustls、ring)。
 ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
 zip = { version = "9.7.3", default-features = false, features = ["deflate-flate2"] }

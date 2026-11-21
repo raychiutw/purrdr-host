@@ -1682,6 +1682,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "toml",
  "ureq",
  "windows-sys 0.61.2",
  "zip",
