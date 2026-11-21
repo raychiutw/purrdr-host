@@ -399,6 +399,24 @@ async fn the_configured_state_directory_is_denied_even_under_the_working_directo
 }
 
 #[tokio::test]
+async fn the_logs_folder_inside_the_state_directory_is_denied() {
+    // raychiutw/purrdr.host#42:log 與稽核紀錄都在主機服務資料夾的 logs/ 底下,app 不能讀走。
+    let fixture = Fixture::start_with(FixtureOptions {
+        state_directory: Some("ledger/service-state"),
+        ..FixtureOptions::default()
+    })
+    .await;
+    let log = fixture.service.state_path.join("logs").join("host-service.log");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, "started\n").unwrap();
+    let mut client = fixture.client().await;
+
+    let reply = client.request(stat(&log)).await;
+
+    assert_eq!(reply["status"], "denied");
+}
+
+#[tokio::test]
 async fn excluded_locations_are_matched_without_case() {
     let fixture = Fixture::start().await;
     let key = fixture.in_project(".SSH/id_ed25519", b"hello");

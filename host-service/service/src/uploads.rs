@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
 
 use crate::protocol::{MAXIMUM_FILE_CHUNK, MAXIMUM_FILE_SIZE, UPLOAD_FOLDER};
+use crate::service_log::ServiceLog;
 
 /// 舊版家目錄底下的上傳資料夾。
 pub const LEGACY_UPLOAD_FOLDER: [&str; 2] = [".purrdr", "uploads"];
@@ -24,13 +25,13 @@ pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// 啟動時與之後每 `CLEANUP_INTERVAL` 清掉超過 7 天的上傳檔;`clock` 提供現在時間(測試注入)。
-pub fn spawn_cleanup(directories: Vec<UploadDirectory>, clock: impl Fn() -> SystemTime + Send + 'static) -> JoinHandle<()> {
+pub fn spawn_cleanup(directories: Vec<UploadDirectory>, log: ServiceLog, clock: impl Fn() -> SystemTime + Send + 'static) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             // 資料夾只有少量檔案，直接在這裡做。
             for directory in &directories {
                 if let Err(error) = directory.remove_expired(clock()) {
-                    eprintln!("cannot clean uploads {}: {error}", directory.path.display());
+                    log.record(&format!("cannot clean uploads {}: {error}", directory.path.display()));
                 }
             }
             tokio::time::sleep(CLEANUP_INTERVAL).await;

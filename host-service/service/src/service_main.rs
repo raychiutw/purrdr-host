@@ -19,7 +19,7 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
     let service = match crate::start(config).await {
         Ok(service) => service,
         Err(error) => {
-            eprintln!("cannot listen: {error}");
+            crate::service_log::ServiceLog::under(&state_directory).record(&format!("cannot listen: {error}"));
             return ExitCode::FAILURE;
         }
     };
@@ -30,7 +30,7 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
         herdr_socket.native_name()
     );
     if let Err(error) = crate::running_service::write(&state_directory, service.local_addr().port()) {
-        eprintln!("cannot write running.json: {error}");
+        crate::service_log::ServiceLog::under(&state_directory).record(&format!("cannot write running.json: {error}"));
     }
     // 安裝好的那份才會自動更新(開發中直接執行的不會)。
     let _auto_update = crate::auto_update::spawn_for_installed_service(herdr_socket);

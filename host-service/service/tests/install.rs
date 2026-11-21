@@ -53,6 +53,47 @@ fn linux_install_enables_systemd_user_unit_started_at_login() {
 }
 
 #[test]
+fn macos_launch_agent_does_not_redirect_output_because_the_service_writes_its_own_log() {
+    let host = TestHost::new(InstallPlatform::MacOs);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+
+    installer.install(&host.options(PORT), |_| true).unwrap();
+
+    let plist = std::fs::read_to_string(host.home.0.join(format!("Library/LaunchAgents/{LAUNCH_AGENT_LABEL}.plist"))).unwrap();
+    assert!(!plist.contains("StandardOutPath"), "{plist}");
+    assert!(!plist.contains("StandardErrorPath"), "{plist}");
+}
+
+#[test]
+fn linux_unit_discards_output_instead_of_filling_the_journal_with_a_second_copy_of_the_log() {
+    let host = TestHost::new(InstallPlatform::Linux);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+
+    installer.install(&host.options(PORT), |_| true).unwrap();
+
+    let unit = std::fs::read_to_string(host.home.0.join(".config/systemd/user").join(SYSTEMD_UNIT)).unwrap();
+    assert!(unit.contains("StandardOutput=null\n"), "{unit}");
+    assert!(unit.contains("StandardError=null\n"), "{unit}");
+}
+
+#[test]
+fn install_creates_the_logs_folder_and_uninstall_removes_it_with_what_the_service_wrote() {
+    for platform in PLATFORMS {
+        let host = TestHost::new(platform);
+        let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+        installer.install(&host.options(PORT), |_| true).unwrap();
+        let logs = host.service_directory().join("logs");
+        assert!(logs.is_dir(), "{platform:?}");
+        std::fs::write(logs.join("host-service.log"), "started\n").unwrap();
+        std::fs::write(logs.join("host-service.log.1"), "older\n").unwrap();
+
+        installer.uninstall().unwrap();
+
+        assert!(!host.service_directory().exists(), "{platform:?}");
+    }
+}
+
+#[test]
 fn linux_unit_goes_to_xdg_config_home_when_set() {
     let host = TestHost::new(InstallPlatform::Linux);
     let mut environment = host.environment();

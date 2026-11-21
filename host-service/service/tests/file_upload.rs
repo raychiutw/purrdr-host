@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use purrdr_host_service::protocol::{MAXIMUM_FILE_CHUNK, MAXIMUM_FILE_SIZE};
+use purrdr_host_service::service_log::ServiceLog;
 use purrdr_host_service::transcript::TranscriptEnvironment;
 use purrdr_host_service::uploads::{CLEANUP_INTERVAL, UploadDirectory, spawn_cleanup};
 use serde_json::{Value, json};
@@ -267,7 +268,7 @@ async fn scheduled_cleanup_removes_uploads_once_they_pass_seven_days() {
     let started = tokio::time::Instant::now();
     let clock = move || uploaded_at + 7 * DAY - Duration::from_secs(60) + started.elapsed();
 
-    let _cleanup = spawn_cleanup(vec![uploads.clone()], clock);
+    let _cleanup = spawn_cleanup(vec![uploads.clone()], ServiceLog::under(temp.path()), clock);
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(old.exists(), "啟動時還沒滿 7 天");
 
