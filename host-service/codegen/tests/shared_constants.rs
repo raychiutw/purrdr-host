@@ -8,6 +8,7 @@ fn protocol() -> Protocol {
         "x-protocol-version": 1,
         "x-excluded-file-locations": [".ssh", ".purrdr/push-*"],
         "x-temporary-file-locations": ["/tmp", "/var/folders"],
+        "x-upload-folder": "purrdr-uploads",
         "x-maximum-file-size": 26_214_400,
         "x-maximum-file-chunk": 1_048_576,
         "$defs": {}
@@ -61,6 +62,36 @@ fn temporary_locations_and_size_limits_become_swift_constants() {
     ] {
         assert!(swift.contains(expected), "缺少 {expected}:\n{swift}");
     }
+}
+
+#[test]
+fn the_upload_folder_name_becomes_a_rust_and_a_swift_constant() {
+    let protocol = protocol();
+
+    assert!(
+        protocol.rust().contains("pub const UPLOAD_FOLDER: &str = \"purrdr-uploads\";"),
+        "{}",
+        protocol.rust()
+    );
+    assert!(
+        protocol.swift().contains("public static let uploadFolder = \"purrdr-uploads\""),
+        "{}",
+        protocol.swift()
+    );
+}
+
+#[test]
+fn schemas_without_the_upload_folder_are_rejected() {
+    let missing = Protocol::parse(&json!({
+        "x-protocol-version": 1,
+        "x-excluded-file-locations": [],
+        "x-temporary-file-locations": [],
+        "x-maximum-file-size": 1,
+        "x-maximum-file-chunk": 1,
+        "$defs": {}
+    }));
+
+    assert!(missing.is_err());
 }
 
 #[test]

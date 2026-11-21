@@ -1,5 +1,9 @@
-//! 上傳圖片與檔案(raychiutw/purrdr.host#16):分塊寫到家目錄的 `.purrdr/uploads/`(與 app 的 SSH 上傳同一個資料夾),
-//! 檔名由主機服務產生。
+//! 上傳圖片與檔案(raychiutw/purrdr.host#16、#41):分塊寫到系統暫存目錄底下的 Purrdr 上傳資料夾,檔名由主機服務產生。
+//!
+//! 上傳檔只給 Agent 讀一次，所以放在系統暫存目錄(macOS／Linux 的 `TMPDIR`、Windows 的 `TEMP`),不放進家目錄的
+//! 長期資料夾。Unix 的暫存目錄(例如 Linux 的 `/tmp`)可能多人共用，所以資料夾名稱帶 uid、權限 0700,
+//! 而且已存在的資料夾必須是自己的真資料夾(不是 symlink、擁有者是自己、別人進不去)才使用。
+//! 舊版寫在家目錄 `.purrdr/uploads/`:不再寫入，只照同樣的 7 天規則清理，清空後移除。
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -8,10 +12,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::task::JoinHandle;
 
-use crate::protocol::{MAXIMUM_FILE_CHUNK, MAXIMUM_FILE_SIZE};
+use crate::protocol::{MAXIMUM_FILE_CHUNK, MAXIMUM_FILE_SIZE, UPLOAD_FOLDER};
 
-/// 家目錄底下的上傳資料夾。
-pub const UPLOAD_FOLDER: [&str; 2] = [".purrdr", "uploads"];
+/// 舊版家目錄底下的上傳資料夾。
+pub const LEGACY_UPLOAD_FOLDER: [&str; 2] = [".purrdr", "uploads"];
 
 /// 上傳檔保留多久(與 SSH 上傳的 `find -mmin +10080` 相同)。
 pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -20,28 +24,61 @@ pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// 啟動時與之後每 `CLEANUP_INTERVAL` 清掉超過 7 天的上傳檔;`clock` 提供現在時間(測試注入)。
-pub fn spawn_cleanup(directory: UploadDirectory, clock: impl Fn() -> SystemTime + Send + 'static) -> JoinHandle<()> {
+pub fn spawn_cleanup(directories: Vec<UploadDirectory>, clock: impl Fn() -> SystemTime + Send + 'static) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             // 資料夾只有少量檔案，直接在這裡做。
-            if let Err(error) = directory.remove_expired(clock()) {
-                eprintln!("cannot clean uploads {}: {error}", directory.path.display());
+            for directory in &directories {
+                if let Err(error) = directory.remove_expired(clock()) {
+                    eprintln!("cannot clean uploads {}: {error}", directory.path.display());
+                }
             }
             tokio::time::sleep(CLEANUP_INTERVAL).await;
         }
     })
 }
 
-/// 家目錄的 `.purrdr/uploads/`。
+/// 一個上傳資料夾:暫存目錄底下的新資料夾，或舊版的家目錄資料夾。
 #[derive(Debug, Clone)]
 pub struct UploadDirectory {
     path: PathBuf,
+    /// 目前使用者的 uid(Unix);拿不到時不能安全使用資料夾。
+    #[cfg(unix)]
+    owner: Option<u32>,
+    /// 舊資料夾清空後移除;新資料夾留著(上傳中的連線還要用)。
+    remove_when_empty: bool,
 }
 
 impl UploadDirectory {
-    pub fn under_home(home: &Path) -> Self {
+    /// 暫存目錄底下的上傳資料夾。Unix 以自己建檔的擁有者取得 uid(不需要 unsafe),名稱帶 uid。
+    pub fn under_temporary_directory(temporary_directory: &Path) -> Self {
+        #[cfg(unix)]
+        {
+            let owner = current_user_id(temporary_directory).ok();
+            let name = match owner {
+                Some(uid) => format!("{UPLOAD_FOLDER}-{uid}"),
+                None => format!("{UPLOAD_FOLDER}-unknown"),
+            };
+            UploadDirectory {
+                path: temporary_directory.join(name),
+                owner,
+                remove_when_empty: false,
+            }
+        }
+        #[cfg(not(unix))]
         UploadDirectory {
-            path: UPLOAD_FOLDER.iter().fold(home.to_owned(), |path, segment| path.join(segment)),
+            path: temporary_directory.join(UPLOAD_FOLDER),
+            remove_when_empty: false,
+        }
+    }
+
+    /// 舊版家目錄的 `.purrdr/uploads/`(只清理、不寫入)。
+    pub fn legacy_under_home(home: &Path) -> Self {
+        UploadDirectory {
+            path: LEGACY_UPLOAD_FOLDER.iter().fold(home.to_owned(), |path, segment| path.join(segment)),
+            #[cfg(unix)]
+            owner: None,
+            remove_when_empty: true,
         }
     }
 
@@ -49,7 +86,7 @@ impl UploadDirectory {
         &self.path
     }
 
-    /// 刪掉修改時間比 `now` 早超過 7 天的檔案。
+    /// 刪掉修改時間比 `now` 早超過 7 天的檔案;舊資料夾清空後移除。
     pub fn remove_expired(&self, now: SystemTime) -> io::Result<()> {
         let entries = match std::fs::read_dir(&self.path) {
             Ok(entries) => entries,
@@ -68,7 +105,41 @@ impl UploadDirectory {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
+        if self.remove_when_empty {
+            // 還有檔案時 remove_dir 會失敗，正好不移除。
+            let _ = std::fs::remove_dir(&self.path);
+        }
         Ok(())
+    }
+
+    /// 建立上傳資料夾，或確認已存在的是自己的私人資料夾。
+    fn prepare_directory(&self) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            let owner = self
+                .owner
+                .ok_or_else(|| io::Error::other("cannot tell which user owns the temporary directory"))?;
+            use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            match std::fs::DirBuilder::new().mode(0o700).create(&self.path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    // 已存在:不跟隨 symlink,必須是自己的資料夾且別人進不去(不替別人改權限)。
+                    let metadata = std::fs::symlink_metadata(&self.path)?;
+                    let private = metadata.mode() & 0o077 == 0;
+                    if metadata.is_dir() && metadata.uid() == owner && private {
+                        Ok(())
+                    } else {
+                        Err(io::Error::other(format!("{} is not a private folder owned by this user", self.path.display())))
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(&self.path)
     }
 
     /// 開始一次上傳：在上傳資料夾建隱藏的暫存檔。
@@ -81,7 +152,7 @@ impl UploadDirectory {
             Some(_) => return Err(UploadFailure::Invalid("extension must be 1-16 ASCII letters or digits")),
             None => None,
         };
-        create_private_directory(&self.path).map_err(UploadFailure::Storage)?;
+        self.prepare_directory().map_err(UploadFailure::Storage)?;
         let temporary = self.path.join(format!(".upload.{}", random_base36(16).map_err(UploadFailure::Storage)?));
         let file = create_private_file(&temporary).map_err(UploadFailure::Storage)?;
         Ok(PendingUpload {
@@ -211,15 +282,16 @@ fn random_base36(length: usize) -> io::Result<String> {
     Ok(bytes.iter().map(|byte| BASE36_DIGITS[usize::from(*byte) % 36] as char).collect())
 }
 
-/// 只有本人可讀(Unix 700,與 SSH 上傳相同)。
-fn create_private_directory(path: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
+/// 目前使用者的 uid:在 `directory` 建一個自己的檔案、讀它的擁有者再刪掉。
+#[cfg(unix)]
+fn current_user_id(directory: &Path) -> io::Result<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let probe = directory.join(format!(".purrdr-owner-probe-{}", random_base36(12)?));
+    let file = create_private_file(&probe)?;
+    let uid = file.metadata().map(|metadata| metadata.uid());
+    drop(file);
+    let _ = std::fs::remove_file(&probe);
+    uid
 }
 
 fn create_private_file(path: &Path) -> io::Result<File> {

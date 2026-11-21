@@ -98,7 +98,7 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
         file_pacing: RequestPacing::default(),
         file_snapshot: None,
         push: context.push.clone(),
-        uploads: context.files.home.as_deref().map(UploadDirectory::under_home),
+        uploads: context.uploads.clone(),
         pending_uploads: HashMap::new(),
         service_management: context.service_management.clone(),
         devices: context.devices.clone(),

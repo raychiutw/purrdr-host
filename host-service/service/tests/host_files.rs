@@ -458,6 +458,23 @@ async fn a_temporary_file_the_agent_mentions_is_allowed_even_when_home_is_the_wo
 }
 
 #[tokio::test]
+async fn an_upload_in_the_temporary_upload_folder_the_agent_mentions_is_allowed() {
+    // 上傳資料夾在暫存目錄底下(raychiutw/purrdr.host#41):Agent 提到上傳的圖片時照樣讀得到。
+    let fixture = Fixture::start_with(FixtureOptions {
+        working_directory: WorkingDirectory::Home,
+        ..FixtureOptions::default()
+    })
+    .await;
+    let upload = fixture.in_temporary("purrdr-uploads-501/mh1-aaaaaaaa.jpg", b"hello");
+    let mut client = fixture.client().await;
+    fixture.agent_mentions(&mut client, &upload).await;
+
+    let reply = client.request(stat(&upload)).await;
+
+    assert_eq!(reply["status"], "file");
+}
+
+#[tokio::test]
 async fn a_path_the_agent_wrote_in_a_transcript_located_on_this_connection_is_allowed() {
     let fixture = Fixture::start().await;
     let image = fixture.in_temporary("shots/screen shot.png", b"hello");

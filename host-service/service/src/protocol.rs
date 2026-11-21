@@ -11,6 +11,9 @@ pub const EXCLUDED_FILE_LOCATIONS: &[&str] = &[".ssh", ".gnupg", ".aws", ".azure
 /// 主機取檔在工作目錄以外可放行的系統暫存目錄(schema 的 `x-temporary-file-locations`)。
 pub const TEMPORARY_FILE_LOCATIONS: &[&str] = &["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
 
+/// 暫存目錄底下的上傳資料夾名稱(schema 的 `x-upload-folder`;Unix 之後接 `-<uid>`)。
+pub const UPLOAD_FOLDER: &str = "purrdr-uploads";
+
 /// 主機取檔的大小上限(schema 的 `x-maximum-file-size`)。
 pub const MAXIMUM_FILE_SIZE: u64 = 26214400;
 
@@ -1306,7 +1309,7 @@ pub struct PushUpdateMutedResult {
     pub other_devices: i64,
 }
 
-/// 上傳圖片或檔案(raychiutw/purrdr.host#16):開始一次分塊上傳。主機服務在家目錄的 .purrdr/uploads/ 建暫存檔，檔名由主機服務產生(不採用 app 給的名稱),超過 7 天的上傳檔定期刪除。size 超過 x-maximum-file-size 回 upload_too_large。中繼資料剝除在 app 端做，主機服務不解析內容。
+/// 上傳圖片或檔案(raychiutw/purrdr.host#16):開始一次分塊上傳。主機服務在系統暫存目錄底下的上傳資料夾(x-upload-folder)建暫存檔，檔名由主機服務產生(不採用 app 給的名稱),超過 7 天的上傳檔定期刪除。size 超過 x-maximum-file-size 回 upload_too_large。中繼資料剝除在 app 端做，主機服務不解析內容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileUploadStart {
     /// 也是這次上傳的 upload_id。

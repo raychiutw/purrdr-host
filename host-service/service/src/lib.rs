@@ -169,11 +169,16 @@ impl Drop for RunningHostService {
 pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostService> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port)).await?;
     let local_addr = listener.local_addr()?;
-    let upload_cleanup = config
-        .transcripts
-        .home
-        .as_deref()
-        .map(|home| uploads::spawn_cleanup(uploads::UploadDirectory::under_home(home), std::time::SystemTime::now));
+    // 新資料夾在暫存目錄底下;舊的家目錄資料夾只清理。
+    let uploads = config.temporary_directory.as_deref().map(uploads::UploadDirectory::under_temporary_directory);
+    let upload_cleanup = {
+        let directories: Vec<_> = uploads
+            .iter()
+            .cloned()
+            .chain(config.transcripts.home.as_deref().map(uploads::UploadDirectory::legacy_under_home))
+            .collect();
+        (!directories.is_empty()).then(|| uploads::spawn_cleanup(directories, std::time::SystemTime::now))
+    };
     let herdr = HerdrClient::new(config.herdr_socket);
     let observer = config.observer.map(|options| {
         let observer = agent_observer::AgentObserver::load(&config.state_directory);
@@ -188,6 +193,7 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         devices: DeviceStore::new(&config.state_directory),
         audit: AuditLog::new(&config.state_directory),
         heartbeat: config.heartbeat,
+        uploads,
         files: host_files::FileAccessEnvironment {
             home: config.transcripts.home.clone(),
             temporary_directory: config.temporary_directory,

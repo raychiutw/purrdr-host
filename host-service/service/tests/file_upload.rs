@@ -1,5 +1,6 @@
-//! 上傳圖片與檔案(raychiutw/purrdr.host#16):`file.upload.start`／`file.upload.chunk` 分塊寫到家目錄的 `.purrdr/uploads/`。
-//! 以真正的 WebSocket client 連上主機服務，家目錄是暫存資料夾，外部行為只看回應、上傳資料夾的檔案與 `audit.log`。
+//! 上傳圖片與檔案(raychiutw/purrdr.host#16、#41):`file.upload.start`／`file.upload.chunk` 分塊寫到系統暫存目錄底下的
+//! `purrdr-uploads*` 資料夾。以真正的 WebSocket client 連上主機服務，家目錄與暫存目錄都是暫存資料夾，
+//! 外部行為只看回應、上傳資料夾的檔案與 `audit.log`。
 
 mod support;
 
@@ -17,6 +18,8 @@ use tempfile::TempDir;
 
 struct Fixture {
     home: TempDir,
+    /// 注入給主機服務的系統暫存目錄。
+    temp: TempDir,
     _herdr: FakeHerdr,
     service: TestHostService,
 }
@@ -24,6 +27,7 @@ struct Fixture {
 impl Fixture {
     async fn start() -> Fixture {
         let home = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+        let temp = tempfile::tempdir_in(support::test_files_directory()).unwrap();
         let herdr = FakeHerdr::start(vec![("ping", recorded("ping.ndjson"))]).await;
         let service = start_file_service(
             herdr.socket.clone(),
@@ -32,23 +36,41 @@ impl Fixture {
                     home: Some(home.path().to_owned()),
                     ..TranscriptEnvironment::default()
                 },
-                temporary_directory: None,
+                temporary_directory: Some(temp.path().to_owned()),
                 state_directory: None,
             },
         )
         .await;
-        Fixture { home, _herdr: herdr, service }
+        Fixture {
+            home,
+            temp,
+            _herdr: herdr,
+            service,
+        }
+    }
+
+    /// 暫存目錄底下的上傳資料夾(名稱以 `purrdr-uploads` 開頭);還沒建立時是空的。
+    fn upload_folders(&self) -> Vec<PathBuf> {
+        std::fs::read_dir(self.temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with("purrdr-uploads"))
+            .collect()
     }
 
     fn uploads(&self) -> PathBuf {
-        self.home.path().join(".purrdr").join("uploads")
+        let mut folders = self.upload_folders();
+        assert_eq!(folders.len(), 1, "暫存目錄底下應該剛好一個上傳資料夾:{folders:?}");
+        folders.remove(0)
     }
 
     /// 上傳資料夾裡的檔名(含暫存檔)。
     fn uploaded_names(&self) -> Vec<String> {
-        std::fs::read_dir(self.uploads())
-            .map(|entries| entries.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect())
-            .unwrap_or_default()
+        self.upload_folders()
+            .iter()
+            .flat_map(|folder| std::fs::read_dir(folder).unwrap())
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
     }
 
     async fn client(&self) -> TestClient {
@@ -71,7 +93,7 @@ fn chunk(request_id: &str, upload_id: &str, offset: usize, bytes: &[u8]) -> Valu
 }
 
 #[tokio::test]
-async fn chunks_are_stored_under_home_uploads_and_the_absolute_path_is_returned() {
+async fn chunks_are_stored_under_the_temporary_directory_and_the_absolute_path_is_returned() {
     let fixture = Fixture::start().await;
     let mut client = fixture.client().await;
 
@@ -90,6 +112,8 @@ async fn chunks_are_stored_under_home_uploads_and_the_absolute_path_is_returned(
     assert_eq!(path.parent(), Some(fixture.uploads().as_path()));
     assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
     assert_eq!(fixture.uploaded_names().len(), 1, "暫存檔已換成正式檔");
+    assert!(path.starts_with(fixture.temp.path()), "{path:?} 不在暫存目錄底下");
+    assert!(!fixture.home.path().join(".purrdr").exists(), "不再寫進家目錄的 .purrdr");
 }
 
 #[tokio::test]
@@ -207,8 +231,8 @@ fn place_upload(uploads: &UploadDirectory, name: &str, modified: SystemTime) -> 
 
 #[test]
 fn files_older_than_seven_days_are_removed_and_newer_ones_kept() {
-    let home = tempfile::tempdir_in(support::test_files_directory()).unwrap();
-    let uploads = UploadDirectory::under_home(home.path());
+    let temp = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let uploads = UploadDirectory::under_temporary_directory(temp.path());
     let uploaded_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
     let old = place_upload(&uploads, "mh1-aaaaaaaa.jpg", uploaded_at);
     let old_partial = place_upload(&uploads, ".upload.abcdef", uploaded_at);
@@ -225,23 +249,25 @@ fn files_older_than_seven_days_are_removed_and_newer_ones_kept() {
 
 #[test]
 fn removing_expired_uploads_without_an_upload_folder_is_not_an_error() {
-    let home = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let temp = tempfile::tempdir_in(support::test_files_directory()).unwrap();
 
-    UploadDirectory::under_home(home.path()).remove_expired(SystemTime::now()).unwrap();
+    UploadDirectory::under_temporary_directory(temp.path())
+        .remove_expired(SystemTime::now())
+        .unwrap();
 
-    assert!(!home.path().join(".purrdr").exists(), "不為了清理而建資料夾");
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0, "不為了清理而建資料夾");
 }
 
 #[tokio::test(start_paused = true)]
 async fn scheduled_cleanup_removes_uploads_once_they_pass_seven_days() {
-    let home = tempfile::tempdir_in(support::test_files_directory()).unwrap();
-    let uploads = UploadDirectory::under_home(home.path());
+    let temp = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let uploads = UploadDirectory::under_temporary_directory(temp.path());
     let uploaded_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
     let old = place_upload(&uploads, "mh1-aaaaaaaa.jpg", uploaded_at);
     let started = tokio::time::Instant::now();
     let clock = move || uploaded_at + 7 * DAY - Duration::from_secs(60) + started.elapsed();
 
-    let _cleanup = spawn_cleanup(uploads.clone(), clock);
+    let _cleanup = spawn_cleanup(vec![uploads.clone()], clock);
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(old.exists(), "啟動時還沒滿 7 天");
 
@@ -252,7 +278,8 @@ async fn scheduled_cleanup_removes_uploads_once_they_pass_seven_days() {
 #[tokio::test]
 async fn host_service_cleans_expired_uploads_when_it_starts() {
     let home = tempfile::tempdir_in(support::test_files_directory()).unwrap();
-    let uploads = UploadDirectory::under_home(home.path());
+    let temp = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let uploads = UploadDirectory::under_temporary_directory(temp.path());
     let old = place_upload(&uploads, "mh1-aaaaaaaa.jpg", SystemTime::now() - 8 * DAY);
     let recent = place_upload(&uploads, "mh2-bbbbbbbb.jpg", SystemTime::now() - DAY);
     let herdr = FakeHerdr::start(vec![("ping", recorded("ping.ndjson"))]).await;
@@ -264,7 +291,7 @@ async fn host_service_cleans_expired_uploads_when_it_starts() {
                 home: Some(home.path().to_owned()),
                 ..TranscriptEnvironment::default()
             },
-            temporary_directory: None,
+            temporary_directory: Some(temp.path().to_owned()),
             state_directory: None,
         },
     )
@@ -276,6 +303,144 @@ async fn host_service_cleans_expired_uploads_when_it_starts() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(recent.exists());
+}
+
+// MARK: - 舊的 ~/.purrdr/uploads
+
+#[test]
+fn the_old_home_folder_is_cleaned_like_the_new_one_and_removed_once_empty() {
+    let home = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let legacy = UploadDirectory::legacy_under_home(home.path());
+    let uploaded_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    let old = place_upload(&legacy, "mh1-aaaaaaaa.jpg", uploaded_at);
+    let recent = place_upload(&legacy, "mh2-bbbbbbbb.jpg", uploaded_at + 2 * DAY);
+
+    legacy.remove_expired(uploaded_at + 7 * DAY + Duration::from_secs(1)).unwrap();
+    assert!(!old.exists());
+    assert!(recent.exists());
+    assert!(legacy.path().exists(), "還有檔案時資料夾留著");
+
+    legacy.remove_expired(uploaded_at + 9 * DAY + Duration::from_secs(1)).unwrap();
+    assert!(!legacy.path().exists(), "清空後移除舊資料夾");
+    assert!(home.path().join(".purrdr").exists(), "只移除 uploads,不動 .purrdr");
+}
+
+#[test]
+fn an_upload_folder_in_the_temporary_directory_is_kept_when_it_becomes_empty() {
+    let temp = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let uploads = UploadDirectory::under_temporary_directory(temp.path());
+    let uploaded_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    place_upload(&uploads, "mh1-aaaaaaaa.jpg", uploaded_at);
+
+    uploads.remove_expired(uploaded_at + 8 * DAY).unwrap();
+
+    assert!(uploads.path().exists(), "新資料夾不因清空而移除(上傳中的連線還要用)");
+}
+
+#[tokio::test]
+async fn host_service_also_cleans_the_old_home_folder_when_it_starts() {
+    let home = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let temp = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let legacy = UploadDirectory::legacy_under_home(home.path());
+    let old = place_upload(&legacy, "mh1-aaaaaaaa.jpg", SystemTime::now() - 8 * DAY);
+    let herdr = FakeHerdr::start(vec![("ping", recorded("ping.ndjson"))]).await;
+
+    let _service = start_file_service(
+        herdr.socket.clone(),
+        FileServiceOptions {
+            transcripts: TranscriptEnvironment {
+                home: Some(home.path().to_owned()),
+                ..TranscriptEnvironment::default()
+            },
+            temporary_directory: Some(temp.path().to_owned()),
+            state_directory: None,
+        },
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while legacy.path().exists() {
+        assert!(tokio::time::Instant::now() < deadline, "啟動後沒有清理舊資料夾:{old:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+// MARK: - Unix:資料夾的擁有者與權限
+
+/// 目前使用者的 uid:以自己剛建立的檔案的擁有者取得。
+#[cfg(unix)]
+fn current_uid(directory: &std::path::Path) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    tempfile::tempfile_in(directory).unwrap().metadata().unwrap().uid()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_upload_folder_is_named_with_the_uid_and_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::start().await;
+    let mut client = fixture.client().await;
+
+    client.request(start("u1", 3, None)).await;
+
+    let folder = fixture.uploads();
+    let name = folder.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(name, format!("purrdr-uploads-{}", current_uid(fixture.temp.path())));
+    assert_eq!(std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777, 0o700);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_in_place_of_the_upload_folder_is_refused_and_its_target_untouched() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::start().await;
+    // 目標本身是自己的 0700 資料夾:只有「是 symlink」這一點能讓主機服務拒絕。
+    let target = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    std::fs::set_permissions(target.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let link = fixture.temp.path().join(format!("purrdr-uploads-{}", current_uid(fixture.temp.path())));
+    std::os::unix::fs::symlink(target.path(), &link).unwrap();
+    let mut client = fixture.client().await;
+
+    let reply = client.request(start("u1", 3, None)).await;
+    let chunked = client.request(chunk("c1", "u1", 0, b"abc")).await;
+
+    assert_eq!(reply["type"], "error", "{reply}");
+    assert_eq!(reply["code"], "internal_error");
+    assert_eq!(chunked["type"], "error", "沒有開成的上傳不能送分塊");
+    assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 0, "symlink 指向的資料夾沒被寫入");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_upload_folder_that_others_can_enter_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::start().await;
+    let folder = fixture.temp.path().join(format!("purrdr-uploads-{}", current_uid(fixture.temp.path())));
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut client = fixture.client().await;
+
+    let reply = client.request(start("u1", 3, None)).await;
+
+    assert_eq!(reply["code"], "internal_error", "{reply}");
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0, "權限過寬的資料夾裡沒有寫入");
+    assert_eq!(std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777, 0o755, "不替別人改權限");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_existing_private_upload_folder_is_reused() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::start().await;
+    let folder = fixture.temp.path().join(format!("purrdr-uploads-{}", current_uid(fixture.temp.path())));
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut client = fixture.client().await;
+
+    client.request(start("u1", 3, None)).await;
+    let stored = client.request(chunk("c1", "u1", 0, b"abc")).await;
+
+    assert_eq!(PathBuf::from(stored["path"].as_str().unwrap()).parent(), Some(folder.as_path()));
 }
 
 /// `audit.log` 裡 event 是 upload 的紀錄。
