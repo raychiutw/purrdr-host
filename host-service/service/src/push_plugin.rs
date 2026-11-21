@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::herdr_cli::HerdrCli;
 use crate::protocol::{PushInstallResult, PushPairing, PushRemoveResult, PushStatusResult, PushUpdateMutedResult, ServerMessage};
+use crate::update_push::{HttpPushTransport, Pairing};
 
 /// 主機外掛(`host-plugin/herdr-plugin.toml`)的 id。
 pub const PLUGIN_ID: &str = "purrdr.push";
@@ -26,6 +27,12 @@ const PLUGIN_MARKER: &str = "push-plugin";
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ENDPOINT_LENGTH: usize = 2048;
+/// 測試通知的主機名稱上限(字數)。
+const MAX_HOST_NAME_LENGTH: usize = 64;
+/// 後台：不認得這組配對(raychiutw/purrdr.server#19)。
+const PAIRING_NOT_FOUND: u16 = 404;
+/// 後台：這組配對已撤銷。
+const PAIRING_REVOKED: u16 = 410;
 
 /// Windows:不開 console 視窗(背景執行檔沒有 console)。
 #[cfg(windows)]
@@ -87,6 +94,8 @@ pub(crate) enum PushFailure {
     Herdr(String),
     /// 這支裝置在這台主機沒有推播配對。
     NotPaired,
+    /// 測試通知送不出去：後台的錯誤碼、`http <狀態碼>` 或連線錯誤(不含密鑰)。
+    SendFailed(String),
     /// 家目錄或檔案操作失敗。
     Internal(String),
 }
@@ -172,6 +181,32 @@ impl PushPlugin {
             paired: true,
             other_devices: other_pairings(&purrdr, device_id),
         })
+    }
+
+    /// 送一則測試通知給這支裝置(#60):對它的配對 endpoint 送 `{key, event: test, host_name?}`,不經過主機外掛與 herdr。
+    /// 後台回 404／410 是沒有配對(410 時刪掉這組配對，期間重新配對的不刪);其他失敗帶後台的錯誤碼。
+    pub async fn send_test(&self, device_id: &str, host_name: Option<&str>) -> Result<(), PushFailure> {
+        validate_device_id(device_id)?;
+        validate_host_name(host_name)?;
+        let pairing = Pairing::read(&self.purrdr_directory()?.join(format!("push-{device_id}"))).ok_or(PushFailure::NotPaired)?;
+        let mut body = serde_json::json!({"key": pairing.key, "event": "test"});
+        if let Some(host_name) = host_name {
+            body["host_name"] = Value::from(host_name);
+        }
+        let (endpoint, body) = (pairing.endpoint.clone(), body.to_string());
+        let reply = tokio::task::spawn_blocking(move || HttpPushTransport::default().post_json_with_reply(&endpoint, &body))
+            .await
+            .map_err(|error| PushFailure::Internal(error.to_string()))?;
+        match reply {
+            Ok((status, _)) if (200..300).contains(&status) => Ok(()),
+            Ok((PAIRING_NOT_FOUND, _)) => Err(PushFailure::NotPaired),
+            Ok((PAIRING_REVOKED, _)) => {
+                pairing.remove_if_unchanged();
+                Err(PushFailure::NotPaired)
+            }
+            Ok((status, reply)) => Err(PushFailure::SendFailed(backend_error_code(&reply).unwrap_or_else(|| format!("http {status}")))),
+            Err(error) => Err(PushFailure::SendFailed(error)),
+        }
     }
 
     /// 移除這支裝置的配對;沒有其他裝置的配對、且外掛是 Purrdr 裝的才移除外掛。
@@ -285,6 +320,25 @@ impl PairingCredentials {
             key: value("key=")?,
         })
     }
+}
+
+/// 測試通知標題用的主機名稱：1–64 個字(同後台的上限)、不含控制字元。
+fn validate_host_name(host_name: Option<&str>) -> Result<(), PushFailure> {
+    let Some(host_name) = host_name else { return Ok(()) };
+    let length = host_name.chars().count();
+    if (1..=MAX_HOST_NAME_LENGTH).contains(&length) && !host_name.chars().any(char::is_control) {
+        Ok(())
+    } else {
+        Err(PushFailure::InvalidRequest("host_name must be 1–64 characters without control characters"))
+    }
+}
+
+/// 後台錯誤本文 `{"error": {"code": …}}` 的錯誤碼;只收小寫英數與底線(不把任意內容轉給 app)。
+fn backend_error_code(reply: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(reply).ok()?;
+    let code = value["error"]["code"].as_str()?;
+    let is_plain = !code.is_empty() && code.len() <= 64 && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    is_plain.then(|| code.to_owned())
 }
 
 /// 配對檔(app 的 `PushPairingFile`):一行一個 `名稱=值`,外掛的 sh 與 PowerShell 不需要 JSON 解析器。
