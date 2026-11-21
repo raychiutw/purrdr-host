@@ -570,6 +570,20 @@ async fn push_test_backend_failures_carry_the_backend_error_code() {
     assert!(harness.home_file(".purrdr/push-phone-a/pairing").is_some(), "送不出去不刪配對");
 }
 
+async fn push_test_does_not_follow_redirects_with_the_key() {
+    let harness = Harness::start().await;
+    let backend = FakePushBackend::start();
+    harness.write_pairing("phone-a", &backend.endpoint(), KEY);
+    backend.respond_to_key_with(KEY, 307, "");
+    let mut client = harness.client().await;
+
+    let reply = client.request(push_test("phone-a")).await;
+
+    assert_eq!(reply["code"], "push_send_failed", "{reply}");
+    assert_eq!(reply["message"], "http 307");
+    assert_eq!(backend.bodies().len(), 1, "沒有把密鑰再送到轉址的目的地");
+}
+
 async fn push_test_is_refused_for_read_only_devices_and_audited_without_the_key() {
     let harness = Harness::start().await;
     let backend = FakePushBackend::start();
@@ -653,6 +667,9 @@ fn tests() -> Vec<TestCase> {
         }),
         ("push_test_backend_failures_carry_the_backend_error_code", || {
             Box::pin(push_test_backend_failures_carry_the_backend_error_code())
+        }),
+        ("push_test_does_not_follow_redirects_with_the_key", || {
+            Box::pin(push_test_does_not_follow_redirects_with_the_key())
         }),
         ("push_test_is_refused_for_read_only_devices_and_audited_without_the_key", || {
             Box::pin(push_test_is_refused_for_read_only_devices_and_audited_without_the_key())

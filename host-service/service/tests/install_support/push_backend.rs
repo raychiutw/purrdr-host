@@ -113,8 +113,10 @@ fn respond(mut stream: TcpStream, received: &Received, status_by_key: &StatusByK
             r#"{"error":{"code":"pairing_revoked","message":"This pairing was revoked."}}"#.to_owned()
         }
     });
+    // 3xx 時轉址回同一個路徑(測試主機服務不跟隨轉址)。
+    let location = if (300..400).contains(&status) { "Location: /v1/push\r\n" } else { "" };
     let head = format!(
-        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n",
         response_body.len()
     );
     let _ = stream.write_all(head.as_bytes());

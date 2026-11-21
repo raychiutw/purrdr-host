@@ -1222,12 +1222,19 @@ fn error_message(request_id: Option<String>, code: ErrorCode, message: &str) -> 
 fn push_reply(request_id: String, outcome: Result<PushState, PushFailure>, result: impl FnOnce(String, PushState) -> ServerMessage) -> ServerMessage {
     match outcome {
         Ok(state) => result(request_id, state),
-        Err(PushFailure::InvalidRequest(message)) => error(Some(request_id), ErrorCode::InvalidMessage, message),
-        Err(PushFailure::HerdrUnavailable(message)) => error(Some(request_id), ErrorCode::HerdrUnavailable, &message),
-        Err(PushFailure::Herdr(message)) => error(Some(request_id), ErrorCode::PushPluginFailed, &message),
-        Err(PushFailure::NotPaired) => error(Some(request_id), ErrorCode::PushNotPaired, "this device has no push pairing on this host"),
-        Err(PushFailure::SendFailed(message)) => error(Some(request_id), ErrorCode::PushSendFailed, &message),
-        Err(PushFailure::Internal(message)) => error(Some(request_id), ErrorCode::InternalError, &message),
+        Err(failure) => push_error(request_id, failure),
+    }
+}
+
+/// 推播請求失敗的錯誤回應。
+fn push_error(request_id: String, failure: PushFailure) -> ServerMessage {
+    match failure {
+        PushFailure::InvalidRequest(message) => error(Some(request_id), ErrorCode::InvalidMessage, message),
+        PushFailure::HerdrUnavailable(message) => error(Some(request_id), ErrorCode::HerdrUnavailable, &message),
+        PushFailure::Herdr(message) => error(Some(request_id), ErrorCode::PushPluginFailed, &message),
+        PushFailure::NotPaired => error(Some(request_id), ErrorCode::PushNotPaired, "this device has no push pairing on this host"),
+        PushFailure::SendFailed(message) => error(Some(request_id), ErrorCode::PushSendFailed, &message),
+        PushFailure::Internal(message) => error(Some(request_id), ErrorCode::InternalError, &message),
     }
 }
 
@@ -1235,7 +1242,7 @@ fn push_reply(request_id: String, outcome: Result<PushState, PushFailure>, resul
 fn push_test_reply(request_id: String, outcome: Result<(), PushFailure>) -> ServerMessage {
     match outcome {
         Ok(()) => ServerMessage::PushTestResult(PushTestResult { request_id }),
-        Err(failure) => push_reply(request_id, Err(failure), PushState::status_result),
+        Err(failure) => push_error(request_id, failure),
     }
 }
 

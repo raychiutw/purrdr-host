@@ -332,6 +332,23 @@ async fn window_with_max_bytes_smaller_than_the_last_line_is_empty() {
 }
 
 #[tokio::test]
+async fn window_with_max_bytes_keeps_a_line_that_exactly_fits() {
+    let fixture = Fixture::recorded_snapshot().await;
+    let content = "{\"a\":1}\n{\"bb\":2}\n";
+    let transcript = fixture.claude_transcript(content);
+    let mut client = fixture.client().await;
+    client.request(locate("r1", "id", CLAUDE_SESSION)).await;
+
+    // 上限剛好是最後一行(含換行)的長度：範圍起點前一個 byte 是換行，第一段就是完整的行。
+    let reply = client
+        .request(window_with_max_bytes("r2", &path_text(&transcript), content.len() as u64, 40, 9))
+        .await;
+
+    assert_eq!(reply["records"], json!([{"length": 8, "text": "{\"bb\":2}"}]), "{reply}");
+    assert_eq!(reply["start"], 8);
+}
+
+#[tokio::test]
 async fn window_with_max_bytes_does_not_grow_past_the_limit() {
     let fixture = Fixture::recorded_snapshot().await;
     let content: String = (0..2000)

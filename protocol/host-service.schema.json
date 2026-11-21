@@ -1308,7 +1308,7 @@
         "type": { "const": "push.test" },
         "request_id": { "type": "string" },
         "device_id": { "type": "string", "description": "同 push.install 的 device_id。" },
-        "host_name": { "type": "string", "description": "app 主機清單上這台主機的名稱，轉給後台放進通知標題(「Test: <名稱> needs you」)。1–64 個字(同後台的上限)、不含控制字元，不合格回 invalid_message;沒帶時不送，後台用預設標題。" }
+        "host_name": { "type": "string", "minLength": 1, "maxLength": 64, "description": "app 主機清單上這台主機的名稱，轉給後台放進通知標題(「Test: <名稱> needs you」)。1–64 個字(同後台的上限)、不含控制字元，不合格回 invalid_message;沒帶時不送，後台用預設標題。" }
       },
       "required": ["type", "request_id", "device_id"]
     },

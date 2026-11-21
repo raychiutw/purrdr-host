@@ -201,6 +201,8 @@ impl PushPlugin {
             Ok((status, _)) if (200..300).contains(&status) => Ok(()),
             Ok((PAIRING_NOT_FOUND, _)) => Err(PushFailure::NotPaired),
             Ok((PAIRING_REVOKED, _)) => {
+                // 與 push.install／push.remove 互斥：不刪到剛重新寫入的配對。
+                let _serial = self.serial.lock().await;
                 pairing.remove_if_unchanged();
                 Err(PushFailure::NotPaired)
             }

@@ -22,6 +22,8 @@ impl Default for HttpPushTransport {
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(10)))
             .http_status_as_error(false)
+            // 不跟隨轉址：配對密鑰在本文裡，不能被轉送到別的主機。
+            .max_redirects(0)
             .user_agent(concat!("purrdr-host-service/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
@@ -54,12 +56,7 @@ impl HttpPushTransport {
 
 impl PushTransport for HttpPushTransport {
     fn post_json(&mut self, endpoint: &str, body: &str) -> Result<u16, String> {
-        self.agent
-            .post(endpoint)
-            .header("Content-Type", "application/json")
-            .send(body)
-            .map(|response| response.status().as_u16())
-            .map_err(|error| error.to_string())
+        self.post_json_with_reply(endpoint, body).map(|(status, _)| status)
     }
 }
 
