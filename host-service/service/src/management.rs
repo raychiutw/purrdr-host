@@ -1,5 +1,6 @@
 //! 主機上的管理指令(與執行中的主機服務共用 `devices.json`):
-//! - `pair [--read-only] [--address <https 位址>]`:顯示 QR code、HTTPS 位址與一次性配對碼
+//! - `pair [--read-only] [--address <https 位址>] [--wait]`:顯示 QR code、HTTPS 位址與一次性配對碼;
+//!   `--wait` 印完後等使用者按 Enter 才結束(herdr 快捷鍵的 popup 在指令結束時就關掉，raychiutw/purrdr.host#47)
 //! - `devices`:列出裝置與最後連線時間
 //! - `revoke <裝置 ID>`:撤銷裝置
 //!
@@ -17,13 +18,14 @@ use crate::device_store::{DeviceStore, PAIRING_CODE_LIFETIME, RevokeFailure};
 use crate::herdr_socket::{Platform, SocketEnvironment};
 use crate::state_directory::resolve_state_directory;
 
-const USAGE: &str = "usage: purrdr-host-service pair [--read-only] [--address <https address>] | devices | revoke <device id>  [--state-dir <dir>]";
+const USAGE: &str = "usage: purrdr-host-service pair [--read-only] [--address <https address>] [--wait] | devices | revoke <device id>  [--state-dir <dir>]";
 
 #[derive(Default)]
 struct Options {
     state_directory: Option<PathBuf>,
     address: Option<String>,
     read_only: bool,
+    wait: bool,
     positionals: Vec<String>,
 }
 
@@ -37,12 +39,18 @@ impl Options {
                 "--state-dir" => options.state_directory = Some(PathBuf::from(value()?)),
                 "--address" => options.address = Some(value()?),
                 "--read-only" => options.read_only = true,
+                "--wait" => options.wait = true,
                 flag if flag.starts_with("--") => return Err(format!("unknown argument: {flag}\n{USAGE}")),
                 positional => options.positionals.push(positional.to_owned()),
             }
         }
         Ok(options)
     }
+}
+
+/// 指令要求印完後等使用者按 Enter(`pair --wait`)。
+pub fn waits_for_enter(arguments: &[String]) -> bool {
+    arguments.first().is_some_and(|command| command == "pair") && arguments.iter().any(|argument| argument == "--wait")
 }
 
 /// 執行管理指令，回傳要印到 stdout 的內容;錯誤時回傳要印到 stderr 的訊息。
@@ -55,7 +63,7 @@ pub fn run(arguments: &[String], platform: Platform, environment: &SocketEnviron
         .or_else(|| resolve_state_directory(platform, environment))
         .ok_or("cannot find the home directory; pass --state-dir")?;
     let accepts_only = |allowed_positionals: usize, allows_pair_flags: bool| {
-        if options.positionals.len() != allowed_positionals || (!allows_pair_flags && (options.read_only || options.address.is_some())) {
+        if options.positionals.len() != allowed_positionals || (!allows_pair_flags && (options.read_only || options.wait || options.address.is_some())) {
             Err(USAGE.to_owned())
         } else {
             Ok(())
@@ -64,7 +72,12 @@ pub fn run(arguments: &[String], platform: Platform, environment: &SocketEnviron
     match command.as_str() {
         "pair" => {
             accepts_only(0, true)?;
-            pair(&state_directory, options.address, options.read_only, now)
+            let printed = pair(&state_directory, options.address, options.read_only, now)?;
+            Ok(if options.wait {
+                format!("{printed}\nPress Enter to close.\n")
+            } else {
+                printed
+            })
         }
         "devices" => {
             accepts_only(0, false)?;

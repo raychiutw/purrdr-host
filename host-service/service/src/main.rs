@@ -37,6 +37,11 @@ fn run_management(arguments: &[String]) -> ExitCode {
     match management::run(arguments, Platform::current(), &SocketEnvironment::from_process(), SystemTime::now()) {
         Ok(output) => {
             print!("{output}");
+            if management::waits_for_enter(arguments) {
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
+                let _ = std::io::stdin().read_line(&mut String::new());
+            }
             ExitCode::SUCCESS
         }
         Err(message) => {

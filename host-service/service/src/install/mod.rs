@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 mod autostart;
 mod command;
+mod herdr_shortcut;
 mod location;
 pub mod system;
 mod tailscale;
@@ -114,6 +115,10 @@ pub struct HostEnvironment {
     pub home: PathBuf,
     /// `XDG_CONFIG_HOME`(Linux 的 systemd user unit 位置)。
     pub xdg_config_home: Option<PathBuf>,
+    /// `HERDR_CONFIG_PATH`(herdr config.toml 的位置，優先於預設位置)。
+    pub herdr_config_file: Option<PathBuf>,
+    /// `APPDATA`(Windows 的 herdr config 資料夾在它底下)。
+    pub app_data: Option<PathBuf>,
     /// 登入帳號(Windows 結束背景程式時只結束自己的)。
     pub user_name: Option<String>,
     /// 正在執行的執行檔。
@@ -132,6 +137,8 @@ impl HostEnvironment {
             platform,
             home: PathBuf::from(home),
             xdg_config_home: non_empty("XDG_CONFIG_HOME").map(PathBuf::from),
+            herdr_config_file: non_empty("HERDR_CONFIG_PATH").map(PathBuf::from),
+            app_data: non_empty("APPDATA").map(PathBuf::from),
             user_name: non_empty(if platform == InstallPlatform::Windows { "USERNAME" } else { "USER" }),
             current_executable,
             shell: non_empty("SHELL"),
@@ -297,6 +304,8 @@ pub struct Installed {
     pub pair_command: String,
     /// `bin/` 已加進使用者 PATH(`--no-path` 時 false)。
     pub added_to_path: bool,
+    /// 在 herdr 裡顯示配對 QR code 的快捷鍵;沒加(按鍵已被使用者占用)時是 None。
+    pub herdr_shortcut: Option<String>,
 }
 
 impl std::fmt::Display for Installed {
@@ -305,6 +314,12 @@ impl std::fmt::Display for Installed {
         writeln!(formatter, "HTTPS address: {}", self.https_address)?;
         writeln!(formatter, "To pair a device:")?;
         writeln!(formatter, "  1. On this computer run: {}", self.pair_command)?;
+        if let Some(shortcut) = &self.herdr_shortcut {
+            writeln!(
+                formatter,
+                "     In herdr, press {shortcut} to show the QR code (restart herdr or run `herdr server reload-config` first)."
+            )?;
+        }
         write!(
             formatter,
             "  2. In Purrdr, tap Add host -> HTTPS and scan the QR code (or enter {} and the pairing code).",
@@ -564,6 +579,9 @@ struct InstallRecord {
     /// 安裝對 PATH 做的變更。
     #[serde(default)]
     path: user_path::PathChange,
+    /// 安裝對 herdr config 加的快捷鍵(0.8.0 以前的紀錄沒有這欄)。
+    #[serde(default)]
+    herdr_shortcut: herdr_shortcut::ShortcutChange,
 }
 
 fn enabled() -> bool {
@@ -665,20 +683,30 @@ impl<S: HostSystem> Installer<S> {
             auto_update: options.auto_update.or(previous.as_ref().map(|record| record.auto_update)).unwrap_or(true),
             add_to_path: options.add_to_path.or(previous.as_ref().map(|record| record.add_to_path)).unwrap_or(true),
             path: previous.as_ref().map(|record| record.path.clone()).unwrap_or_default(),
+            herdr_shortcut: previous.as_ref().map(|record| record.herdr_shortcut.clone()).unwrap_or_default(),
         };
         if previous.is_some() {
             // 先停掉執行中的舊版，執行檔才換得掉(Windows)。
             autostart::unregister(&mut self.system, &layout, self.environment.user_name.as_deref())?;
         }
-        let applied = self.apply(&layout, &tailscale, options, serve_in_place, &mut record);
-        if let Err(error) = applied {
-            // 重新安裝失敗時保留已配對的裝置，不還原。
-            if previous.is_none() {
-                self.roll_back(&layout, &tailscale, &record);
+        let shortcut = match self.apply(&layout, &tailscale, options, serve_in_place, &mut record) {
+            Ok(shortcut) => shortcut,
+            Err(error) => {
+                // 重新安裝失敗時保留已配對的裝置，不還原。
+                if previous.is_none() {
+                    self.roll_back(&layout, &tailscale, &record);
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         let mut warnings = Vec::new();
+        let herdr_shortcut = match shortcut {
+            herdr_shortcut::Outcome::Added => Some(herdr_shortcut::KEY.to_owned()),
+            herdr_shortcut::Outcome::Skipped(warning) => {
+                warnings.push(warning);
+                None
+            }
+        };
         // 換了 HTTPS 埠：關掉上次安裝設的舊埠。
         if let Some(previous) = previous.filter(|previous| previous.serve_configured && previous.https_port != record.https_port)
             && let Err(error) = tailscale.remove_serve(&mut self.system, previous.https_port, previous.port)
@@ -690,6 +718,7 @@ impl<S: HostSystem> Installer<S> {
             warnings,
             pair_command: format!("{} pair", shell_quoted(&layout.executable(), self.environment.platform)),
             added_to_path: record.add_to_path,
+            herdr_shortcut,
         })
     }
 
@@ -733,7 +762,7 @@ impl<S: HostSystem> Installer<S> {
         options: &InstallOptions,
         serve_in_place: bool,
         record: &mut InstallRecord,
-    ) -> Result<(), InstallError> {
+    ) -> Result<herdr_shortcut::Outcome, InstallError> {
         for directory in [layout.bin_directory(), layout.log_file().parent().unwrap().to_path_buf()] {
             self.create_directory(&directory, record)?;
         }
@@ -776,14 +805,21 @@ impl<S: HostSystem> Installer<S> {
                 self.record_created(&directory, record);
             }
         }
+        let herdr_config = herdr_shortcut::config_file(&self.environment);
+        if let Some(directory) = herdr_config.parent() {
+            self.create_directory(directory, record)?;
+        }
+        let shortcut = herdr_shortcut::add(&herdr_config, &layout.executable(), self.environment.platform, &mut record.herdr_shortcut)?;
         write_json(&layout.record_file(), record)?;
-        autostart::register(&mut self.system, layout, &service_arguments(record))
+        autostart::register(&mut self.system, layout, &service_arguments(record))?;
+        Ok(shortcut)
     }
 
     /// 安裝失敗時盡力還原;還原本身的錯誤不蓋過原本的錯誤。
     fn roll_back(&mut self, layout: &ServiceLayout, tailscale: &Tailscale, record: &InstallRecord) {
         let _ = autostart::unregister(&mut self.system, layout, self.environment.user_name.as_deref());
         let _ = user_path::remove(&mut self.system, layout, &mut record.path.clone());
+        let _ = herdr_shortcut::remove(&mut record.herdr_shortcut.clone());
         if record.serve_configured {
             let _ = tailscale.remove_serve(&mut self.system, record.https_port, record.port);
         }
@@ -836,6 +872,7 @@ impl<S: HostSystem> Installer<S> {
 
         autostart::unregister(&mut self.system, &layout, self.environment.user_name.as_deref())?;
         user_path::remove(&mut self.system, &layout, &mut record.path)?;
+        herdr_shortcut::remove(&mut record.herdr_shortcut)?;
         if record.serve_configured {
             let removed = Tailscale::locate(&mut self.system, self.environment.platform)
                 .and_then(|tailscale| tailscale.remove_serve(&mut self.system, record.https_port, record.port));

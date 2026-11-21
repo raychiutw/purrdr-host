@@ -186,3 +186,33 @@ fn management_defaults_to_the_purrdr_folder_in_home() {
     assert!(output.is_ok(), "{output:?}");
     assert!(home.path().join(".purrdr").join("host-service").join("devices.json").exists());
 }
+
+/// herdr 的 popup 在指令結束時就關掉：`pair --wait` 印完 QR code 後等使用者按 Enter 才結束(raychiutw/purrdr.host#47)。
+#[test]
+fn pair_wait_keeps_the_qr_code_on_screen_until_enter() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let state_directory = tempfile::tempdir().unwrap();
+    std::fs::write(state_directory.path().join("config.json"), json!({"https_address": ADDRESS}).to_string()).unwrap();
+    let mut pair = Command::new(env!("CARGO_BIN_EXE_purrdr-host-service"))
+        .args(arguments("pair --wait", state_directory.path()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(pair.stdout.take().unwrap());
+    let mut printed = String::new();
+    while !printed.contains("Press Enter to close") {
+        let mut line = String::new();
+        assert_ne!(stdout.read_line(&mut line).unwrap(), 0, "印完前就結束了：{printed}");
+        printed.push_str(&line);
+    }
+    assert!(printed.contains("Pairing code:"), "{printed}");
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(pair.try_wait().unwrap().is_none(), "還沒按 Enter 就結束了");
+    pair.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+    assert!(pair.wait().unwrap().success());
+}

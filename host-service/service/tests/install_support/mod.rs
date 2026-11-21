@@ -110,6 +110,8 @@ impl TestHost {
             platform: self.platform,
             home: self.home.0.clone(),
             xdg_config_home: None,
+            herdr_config_file: None,
+            app_data: None,
             user_name: Some("demo".into()),
             current_executable: self.downloads.0.join(executable_names(self.platform)[0]),
             shell: None,
