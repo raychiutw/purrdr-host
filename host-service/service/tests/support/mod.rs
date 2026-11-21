@@ -337,13 +337,16 @@ impl TestHostService {
 
     /// 稽核紀錄的全部內容。
     pub fn audit_log(&self) -> String {
-        std::fs::read_to_string(self.state_path.join("audit.log")).unwrap_or_default()
+        std::fs::read_to_string(self.state_path.join("logs").join("audit.log")).unwrap_or_default()
     }
 
     /// 主機服務資料夾裡所有檔案的內容(檢查有沒有存明文)。
     pub fn stored_files(&self) -> String {
-        std::fs::read_dir(&self.state_path)
-            .unwrap()
+        // 資料夾底下的檔案(含 logs/ 裡的 audit.log 與服務 log);其他子資料夾讀不成文字,略過。
+        [self.state_path.clone(), self.state_path.join("logs")]
+            .iter()
+            .filter_map(|directory| std::fs::read_dir(directory).ok())
+            .flatten()
             .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap_or_default())
             .collect::<Vec<_>>()
             .join("\n")

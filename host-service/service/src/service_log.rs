@@ -45,6 +45,32 @@ impl RotatingLog {
     }
 }
 
+impl RotatingLog {
+    /// 把舊位置的檔案併進這個 log:舊內容放在最前面，這個 log 已有的內容接在後面，再刪掉舊檔。
+    /// 先寫成暫存檔再換名，中途失敗不會遺失任何一邊;舊檔不存在時什麼也不做。
+    pub fn absorb(&self, legacy: &Path) -> io::Result<()> {
+        let _guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut content = match std::fs::read(legacy) {
+            Ok(content) => content,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        match std::fs::read(&self.path) {
+            Ok(existing) => content.extend(existing),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if let Some(folder) = self.path.parent() {
+            std::fs::create_dir_all(folder)?;
+        }
+        let mut moving = self.path.clone().into_os_string();
+        moving.push(".moving");
+        std::fs::write(&moving, content)?;
+        std::fs::rename(&moving, &self.path)?;
+        std::fs::remove_file(legacy)
+    }
+}
+
 /// 主機服務自己的 log:`<主機服務資料夾>/logs/host-service.log`。
 #[derive(Debug, Clone)]
 pub struct ServiceLog {
