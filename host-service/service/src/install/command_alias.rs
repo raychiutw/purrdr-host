@@ -22,19 +22,18 @@ pub enum CommandAlias {
     Taken(PathBuf),
 }
 
-/// Windows 的別名內容：沒帶參數時印出可用指令(只打 `purrdr` 不該在前景啟動服務)。
+/// Windows `purrdr.cmd` 的第一行：有這行的就是我們放的(內容不同時重寫，讓之後的版本能換掉它)。
+const WINDOWS_MARKER: &str = "@rem purrdr-host-service command alias";
+
+/// Windows 的別名內容。沒帶參數時印出可用指令(只打 `purrdr` 不該在前景啟動服務)。
+/// 每行都在同一行裡 `exit /b`:cmd.exe 執行完不再回頭讀檔，`purrdr uninstall` 刪掉 `bin/` 後才不會出現
+/// "The batch file cannot be found"。
 fn windows_script(executable_name: &str) -> String {
-    [
-        "@echo off".to_owned(),
-        "if \"%~1\"==\"\" goto help".to_owned(),
-        format!("\"%~dp0{executable_name}\" %*"),
-        "exit /b %errorlevel%".to_owned(),
-        ":help".to_owned(),
-        format!("\"%~dp0{executable_name}\" help"),
-        "exit /b %errorlevel%".to_owned(),
-        String::new(),
-    ]
-    .join("\r\n")
+    format!(
+        "{WINDOWS_MARKER}\r\n\
+         @if \"%~1\"==\"\" \"%~dp0{executable_name}\" help & exit /b 2\r\n\
+         @\"%~dp0{executable_name}\" %* & exit /b\r\n"
+    )
 }
 
 pub(super) fn file(layout: &ServiceLayout) -> PathBuf {
@@ -53,8 +52,12 @@ pub(super) fn ensure(layout: &ServiceLayout) -> std::io::Result<CommandAlias> {
             let script = windows_script(executable_name);
             match std::fs::read_to_string(&alias) {
                 Ok(existing) if existing == script => Ok(CommandAlias::Present),
+                Ok(existing) if existing.starts_with(WINDOWS_MARKER) => {
+                    std::fs::write(&alias, script)?;
+                    Ok(CommandAlias::Created)
+                }
                 Ok(_) => Ok(CommandAlias::Taken(alias)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound && !alias.exists() => {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     std::fs::write(&alias, script)?;
                     Ok(CommandAlias::Created)
                 }
@@ -65,18 +68,13 @@ pub(super) fn ensure(layout: &ServiceLayout) -> std::io::Result<CommandAlias> {
     }
 }
 
-/// 指向 `executable_name` 的 symlink 算我們的(含以前寫成絕對路徑的);其他東西不碰。
+/// 只有指向同資料夾 `executable_name` 的相對 symlink 算我們的;其他東西(含指向別處的同名執行檔)不碰。
+/// 相對 symlink 只要執行檔在就不會壞，所以不需要重建。
 fn ensure_link(alias: &Path, executable_name: &str) -> std::io::Result<CommandAlias> {
     match std::fs::read_link(alias) {
         Ok(target) if target == Path::new(executable_name) => Ok(CommandAlias::Present),
-        Ok(target) if target.file_name() == Some(executable_name.as_ref()) => {
-            std::fs::remove_file(alias)?;
-            link(executable_name, alias)?;
-            Ok(CommandAlias::Created)
-        }
-        Ok(_) => Ok(CommandAlias::Taken(alias.to_path_buf())),
-        Err(_) if alias.symlink_metadata().is_ok() => Ok(CommandAlias::Taken(alias.to_path_buf())),
-        Err(_) => {
+        _ if alias.symlink_metadata().is_ok() => Ok(CommandAlias::Taken(alias.to_path_buf())),
+        _ => {
             link(executable_name, alias)?;
             Ok(CommandAlias::Created)
         }

@@ -47,8 +47,9 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
 /// 安裝好的那份啟動時補上指令別名 `purrdr`;沒補成只記 log,不影響服務。
 fn repair_command_alias(log: &crate::service_log::ServiceLog) {
     use crate::install::{CommandAlias, HostEnvironment, InstalledService, system::ProcessHostSystem};
-    let Ok(environment) = HostEnvironment::from_process() else {
-        return;
+    let environment = match HostEnvironment::from_process() {
+        Ok(environment) => environment,
+        Err(error) => return log.record(&format!("the purrdr command was not checked: {error}")),
     };
     match InstalledService::new(environment, ProcessHostSystem).repair_command_alias() {
         Some(Ok(CommandAlias::Taken(file))) => log.record(&format!("the purrdr command was not added: {} already exists", file.display())),

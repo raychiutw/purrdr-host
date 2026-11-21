@@ -25,6 +25,8 @@ usage: purrdr <command>  (same as purrdr-host-service <command>)
   purrdr auto-update on|off                                        turn automatic updates on or off
   purrdr version                                                   show the installed version
   purrdr uninstall                                                 remove the host service
+
+pair, devices and revoke also take --state-dir <dir> (default ~/.purrdr/host-service).
 ";
 
 #[tokio::main]

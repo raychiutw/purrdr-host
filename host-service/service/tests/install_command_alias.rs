@@ -37,19 +37,15 @@ fn windows_adds_a_purrdr_cmd_that_forwards_arguments_and_shows_help_without_them
     let script = std::fs::read_to_string(host.service_directory().join("bin").join("purrdr.cmd")).unwrap();
     assert_eq!(
         script,
-        "@echo off\r\n\
-         if \"%~1\"==\"\" goto help\r\n\
-         \"%~dp0purrdr-host-service.exe\" %*\r\n\
-         exit /b %errorlevel%\r\n\
-         :help\r\n\
-         \"%~dp0purrdr-host-service.exe\" help\r\n\
-         exit /b %errorlevel%\r\n"
+        "@rem purrdr-host-service command alias\r\n\
+         @if \"%~1\"==\"\" \"%~dp0purrdr-host-service.exe\" help & exit /b 2\r\n\
+         @\"%~dp0purrdr-host-service.exe\" %* & exit /b\r\n"
     );
 }
 
 #[test]
 fn install_message_says_purrdr_pair_in_a_new_terminal() {
-    let host = TestHost::new(InstallPlatform::Linux);
+    let host = TestHost::new(InstallPlatform::Windows);
     let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
 
     let message = installer.install(&host.options(PORT), |_| true).unwrap().to_string();
@@ -60,7 +56,7 @@ fn install_message_says_purrdr_pair_in_a_new_terminal() {
 
 #[test]
 fn without_path_the_install_message_keeps_the_full_command() {
-    let host = TestHost::new(InstallPlatform::Linux);
+    let host = TestHost::new(InstallPlatform::Windows);
     let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
     let options = purrdr_host_service::install::InstallOptions {
         add_to_path: Some(false),
@@ -70,10 +66,7 @@ fn without_path_the_install_message_keeps_the_full_command() {
     let message = installer.install(&options, |_| true).unwrap().to_string();
 
     assert!(!message.contains("run: purrdr pair"), "{message}");
-    assert!(
-        message.contains("bin/purrdr-host-service' pair") || message.contains("bin/purrdr-host-service pair"),
-        "{message}"
-    );
+    assert!(message.contains("purrdr-host-service.exe pair"), "{message}");
 }
 
 #[test]
@@ -144,22 +137,32 @@ fn a_copy_run_from_elsewhere_does_not_touch_the_installed_bin() {
 
 #[cfg(unix)]
 #[test]
-fn installed_copy_replaces_its_own_old_alias_but_not_someone_elses_link() {
+fn installed_copy_leaves_a_link_to_another_purrdr_host_service_alone() {
     let host = TestHost::new(InstallPlatform::MacOs);
     install(&host);
-    let bin = host.service_directory().join("bin");
-    let alias = bin.join("purrdr");
-
+    let alias = host.service_directory().join("bin").join("purrdr");
     std::fs::remove_file(&alias).unwrap();
-    std::os::unix::fs::symlink(bin.join("purrdr-host-service"), &alias).unwrap();
-    assert_eq!(running_installed_copy(&host).repair_command_alias(), Some(Ok(CommandAlias::Created)));
-    assert_eq!(std::fs::read_link(&alias).unwrap(), std::path::Path::new("purrdr-host-service"));
+    std::os::unix::fs::symlink("/opt/homebrew/bin/purrdr-host-service", &alias).unwrap();
 
-    std::fs::remove_file(&alias).unwrap();
-    std::os::unix::fs::symlink("/usr/local/bin/other-purrdr", &alias).unwrap();
+    let repaired = running_installed_copy(&host).repair_command_alias();
+
+    assert_eq!(repaired, Some(Ok(CommandAlias::Taken(alias.clone()))));
     assert_eq!(
-        running_installed_copy(&host).repair_command_alias(),
-        Some(Ok(CommandAlias::Taken(alias.clone())))
+        std::fs::read_link(&alias).unwrap(),
+        std::path::Path::new("/opt/homebrew/bin/purrdr-host-service")
     );
-    assert_eq!(std::fs::read_link(&alias).unwrap(), std::path::Path::new("/usr/local/bin/other-purrdr"));
+}
+
+#[test]
+fn installed_copy_rewrites_an_older_purrdr_cmd_of_its_own() {
+    let host = TestHost::new(InstallPlatform::Windows);
+    install(&host);
+    let alias = host.service_directory().join("bin").join("purrdr.cmd");
+    let current = std::fs::read_to_string(&alias).unwrap();
+    std::fs::write(&alias, "@rem purrdr-host-service command alias\r\n@\"%~dp0old.exe\" %*\r\n").unwrap();
+
+    let repaired = running_installed_copy(&host).repair_command_alias();
+
+    assert_eq!(repaired, Some(Ok(CommandAlias::Created)));
+    assert_eq!(std::fs::read_to_string(&alias).unwrap(), current);
 }
