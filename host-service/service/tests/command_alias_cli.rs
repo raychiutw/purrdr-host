@@ -40,6 +40,7 @@ fn alias_in_temp_directory(label: &str) -> (install_support::TempDirectory, std:
     (directory, alias)
 }
 
+#[cfg(unix)]
 fn all_text(output: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
 }
