@@ -116,3 +116,39 @@ async fn a_problem_while_running_is_written_to_the_service_log() {
     let content = wait_for(&running.log(), "cannot clean uploads").await;
     assert!(content.contains(&blocked.display().to_string()), "{content}");
 }
+
+/// launchd 的 StandardOutPath、舊版 systemd unit 的 journal 會接走 stdout／stderr(升級前登記的服務還是這樣):
+/// 服務自己已經寫了 log 檔，輸出不是終端機時就不能再往那裡寫一份，否則同一行出現兩次，輪替後還會寫進舊檔。
+#[test]
+fn a_service_whose_output_is_not_a_terminal_writes_each_line_only_to_its_own_log() {
+    use std::process::{Command, Stdio};
+    let state = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let home = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let temp = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let mut service = Command::new(env!("CARGO_BIN_EXE_purrdr-host-service"))
+        .args(["--port", "0", "--state-dir"])
+        .arg(state.path())
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("TMPDIR", temp.path())
+        .env("TEMP", temp.path())
+        .env("TMP", temp.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let log = state.path().join("logs").join("host-service.log");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !read(&log).contains("listening on") {
+        assert!(std::time::Instant::now() < deadline, "服務沒有寫出 listening:{:?}", read(&log));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    service.kill().unwrap();
+
+    let output = service.wait_with_output().unwrap();
+
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "", "stdout 不是終端機時不輸出");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "", "stderr 不是終端機時不輸出");
+    assert_eq!(read(&log).matches("listening on").count(), 1, "log 檔裡只有一行");
+}

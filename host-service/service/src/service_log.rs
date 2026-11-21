@@ -2,7 +2,7 @@
 //! 不依賴 launchd、systemd 或 Windows 的輸出轉接,三個平台的位置相同,解除安裝時隨資料夾一起移除。
 
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -26,6 +26,10 @@ impl RotatingLog {
             path: path.into(),
             maximum_bytes,
         }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// 寫入一行。這一行放不下(寫了會超過上限)而檔案不是空的，就先把檔案改名為 `.1`(覆蓋舊的)再寫。
@@ -84,13 +88,18 @@ impl ServiceLog {
         }
     }
 
-    /// 記一行(開頭是時間)。同時輸出到 stderr:前景執行時看得到;安裝的服務沒有人接 stderr,不會重複。
+    /// 記一行(開頭是時間)。前景執行(stderr 是終端機)時同時輸出一份給人看;stderr 被接到別處(launchd 的
+    /// StandardErrorPath、舊版 systemd unit 的 journal)時不輸出，以免同一行在檔案裡出現兩次。
     /// 寫不進檔案時只剩 stderr,不能因為記 log 讓服務出錯。
     pub fn record(&self, message: &str) {
         let line = format!("{} {message}", humantime::format_rfc3339_seconds(SystemTime::now()));
-        eprintln!("{line}");
+        let terminal = std::io::stderr().is_terminal();
+        if terminal {
+            eprintln!("{line}");
+        }
         if let Err(error) = self.file.append_line(&line) {
-            eprintln!("cannot write service log {}: {error}", self.file.path.display());
+            // 檔案寫不進去時，這是唯一能看到的地方。
+            eprintln!("cannot write service log {}: {error}", self.file.path().display());
         }
     }
 }

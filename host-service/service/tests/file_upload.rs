@@ -224,6 +224,12 @@ const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 /// 在上傳資料夾放一個修改時間是 `modified` 的檔案。
 fn place_upload(uploads: &UploadDirectory, name: &str, modified: SystemTime) -> PathBuf {
     std::fs::create_dir_all(uploads.path()).unwrap();
+    // 服務自己建的上傳資料夾是 0700;預設權限的資料夾不是我們建的，清理會略過。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(uploads.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let path = uploads.path().join(name);
     std::fs::write(&path, b"x").unwrap();
     std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
@@ -409,6 +415,42 @@ async fn a_symlink_in_place_of_the_upload_folder_is_refused_and_its_target_untou
     assert_eq!(reply["code"], "internal_error");
     assert_eq!(chunked["type"], "error", "沒有開成的上傳不能送分塊");
     assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 0, "symlink 指向的資料夾沒被寫入");
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_does_not_follow_a_symlink_planted_in_place_of_the_upload_folder() {
+    // 共用的 /tmp 上，別的使用者可以先把資料夾名稱建成指向別處的 symlink:清理不能跟著走去刪那裡的檔案。
+    let temp = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let victim = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let precious = victim.path().join("report.pdf");
+    std::fs::write(&precious, b"keep me").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&precious)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    let uploads = UploadDirectory::under_temporary_directory(temp.path());
+    std::os::unix::fs::symlink(victim.path(), uploads.path()).unwrap();
+
+    let _ = uploads.remove_expired(SystemTime::now());
+
+    assert!(precious.exists(), "清理跟著 symlink 刪了別處的檔案");
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_leaves_a_folder_that_others_can_enter_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir_in(support::test_files_directory()).unwrap();
+    let uploads = UploadDirectory::under_temporary_directory(temp.path());
+    let old = place_upload(&uploads, "mh1-aaaaaaaa.jpg", SystemTime::UNIX_EPOCH);
+    std::fs::set_permissions(uploads.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let _ = uploads.remove_expired(SystemTime::now());
+
+    assert!(old.exists(), "權限過寬、不是我們建的資料夾不清理");
 }
 
 #[cfg(unix)]

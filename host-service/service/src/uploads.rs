@@ -89,6 +89,17 @@ impl UploadDirectory {
 
     /// 刪掉修改時間比 `now` 早超過 7 天的檔案;舊資料夾清空後移除。
     pub fn remove_expired(&self, now: SystemTime) -> io::Result<()> {
+        // 暫存目錄可能多人共用:資料夾不是自己的私人資料夾(例如別人換成 symlink)時不碰它，以免跟著走去刪別處的檔案。
+        #[cfg(unix)]
+        if !self.remove_when_empty {
+            let owner = self
+                .owner
+                .ok_or_else(|| io::Error::other("cannot tell which user owns the temporary directory"))?;
+            match verify_private_folder(&self.path, owner) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                other => other?,
+            }
+        }
         let entries = match std::fs::read_dir(&self.path) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -120,22 +131,13 @@ impl UploadDirectory {
             let owner = self
                 .owner
                 .ok_or_else(|| io::Error::other("cannot tell which user owns the temporary directory"))?;
-            use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+            use std::os::unix::fs::DirBuilderExt;
             if let Some(parent) = self.path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             match std::fs::DirBuilder::new().mode(0o700).create(&self.path) {
                 Ok(()) => Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    // 已存在:不跟隨 symlink,必須是自己的資料夾且別人進不去(不替別人改權限)。
-                    let metadata = std::fs::symlink_metadata(&self.path)?;
-                    let private = metadata.mode() & 0o077 == 0;
-                    if metadata.is_dir() && metadata.uid() == owner && private {
-                        Ok(())
-                    } else {
-                        Err(io::Error::other(format!("{} is not a private folder owned by this user", self.path.display())))
-                    }
-                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => verify_private_folder(&self.path, owner),
                 Err(error) => Err(error),
             }
         }
@@ -281,6 +283,18 @@ fn random_base36(length: usize) -> io::Result<String> {
     let mut bytes = vec![0u8; length];
     getrandom::fill(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
     Ok(bytes.iter().map(|byte| BASE36_DIGITS[usize::from(*byte) % 36] as char).collect())
+}
+
+/// 暫存目錄裡已存在的上傳資料夾必須是自己的真資料夾:不跟隨 symlink、擁有者是自己、別人進不去(不替別人改權限)。
+#[cfg(unix)]
+fn verify_private_folder(path: &Path, owner: u32) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() && metadata.uid() == owner && metadata.mode() & 0o077 == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("{} is not a private folder owned by this user", path.display())))
+    }
 }
 
 /// 目前使用者的 uid:在 `directory` 建一個自己的檔案、讀它的擁有者再刪掉。
